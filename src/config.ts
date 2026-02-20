@@ -193,10 +193,23 @@ function normalizeStonith(raw: any): StonithConfig {
 }
 
 function normalizeVip(raw: any): VipConfig {
+  // Extraire IP et CIDR si l'IP contient déjà le CIDR (ex: "192.168.1.250/24")
+  let ip = raw.ip;
+  let cidr = raw.cidr || 24;
+  
+  if (ip && ip.includes('/')) {
+    const parts = ip.split('/');
+    ip = parts[0];
+    // Utiliser le CIDR de l'IP seulement si pas défini explicitement
+    if (!raw.cidr) {
+      cidr = parseInt(parts[1], 10) || 24;
+    }
+  }
+  
   return {
     name: raw.name,
-    ip: raw.ip,
-    cidr: raw.cidr || 24,
+    ip,
+    cidr,
     interface: raw.interface || 'eth0',
   };
 }

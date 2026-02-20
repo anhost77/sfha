@@ -486,6 +486,17 @@ export class SfhaDaemon extends EventEmitter {
   }
 
   /**
+   * Vérifie si le cluster a le quorum
+   * BUG FIX #2: Méthode utilitaire pour vérifier le quorum avant toute action critique
+   * 
+   * @returns true si le cluster est quorate, false sinon
+   */
+  async hasQuorum(): Promise<boolean> {
+    const quorum = getQuorumStatus();
+    return quorum.quorate;
+  }
+
+  /**
    * Force ce nœud à devenir leader
    * Utilisé quand on détecte que le leader actuel ne fonctionne plus (VIP absente)
    * 
@@ -580,7 +591,10 @@ export class SfhaDaemon extends EventEmitter {
     logger.info('Activation des ressources...');
     
     // Activer les VIPs
-    activateAllVips(this.config.vips, this.log);
+    const vipSuccess = activateAllVips(this.config.vips, this.log);
+    if (!vipSuccess) {
+      logger.error('Échec activation VIP - vérifiez les logs pour le détail');
+    }
     
     // Démarrer les services
     this.resourceManager?.startAll();

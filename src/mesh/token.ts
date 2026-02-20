@@ -3,9 +3,9 @@
  * @description Génération et parsing des tokens de join
  */
 
-import { JoinToken } from './types.js';
+import { JoinToken, TokenPeer } from './types.js';
 
-const TOKEN_VERSION = 2;
+const TOKEN_VERSION = 3;
 
 /**
  * Crée un token de join encodé
@@ -20,6 +20,8 @@ export function createJoinToken(options: {
   corosyncPort: number;
   assignedIp?: string;
   usedIps?: string[];
+  peers?: TokenPeer[];
+  initiatorName?: string;
 }): string {
   const token: JoinToken = {
     v: TOKEN_VERSION,
@@ -32,6 +34,8 @@ export function createJoinToken(options: {
     corosyncPort: options.corosyncPort,
     assignedIp: options.assignedIp,
     usedIps: options.usedIps,
+    peers: options.peers,
+    initiatorName: options.initiatorName,
   };
 
   // Encoder en base64url (safe pour copier-coller)
@@ -56,8 +60,8 @@ export function parseJoinToken(tokenStr: string): JoinToken {
     const json = Buffer.from(cleaned, 'base64url').toString('utf-8');
     const token = JSON.parse(json) as JoinToken;
 
-    // Valider la version (accepter v1 et v2)
-    if (token.v !== 1 && token.v !== 2) {
+    // Valider la version (accepter v1, v2 et v3)
+    if (token.v !== 1 && token.v !== 2 && token.v !== 3) {
       throw new Error(`Version de token non supportée: ${token.v}`);
     }
 

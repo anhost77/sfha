@@ -15,9 +15,18 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sfha
 
-# Sécurité minimale (besoin de root pour ip addr)
-PrivateTmp=true
-ProtectHome=true
+# Désactivation de TOUTES les restrictions namespace pour compatibilité LXC
+PrivateTmp=no
+ProtectHome=no
+ProtectSystem=no
+PrivateDevices=no
+ProtectHostname=no
+ProtectClock=no
+ProtectKernelTunables=no
+ProtectKernelModules=no
+ProtectKernelLogs=no
+ProtectControlGroups=no
+RestrictNamespaces=no
 
 [Install]
 WantedBy=multi-user.target

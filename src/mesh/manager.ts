@@ -48,7 +48,7 @@ import {
   disableWgQuickService,
   detectPublicEndpoint,
 } from './wireguard.js';
-import { updateCorosyncForMesh } from './corosync-mesh.js';
+import { updateCorosyncForMesh, addNodeToCorosync, removeNodeFromCorosync, reloadCorosync, getNextNodeId } from './corosync-mesh.js';
 
 const MESH_CONFIG_PATH = '/etc/sfha/mesh.json';
 const WG_KEYS_DIR = '/etc/sfha/wireguard';
@@ -296,12 +296,31 @@ export class MeshManager {
 
     // Créer le peer initial (le nœud qui a généré le token)
     const initiatorPeer: MeshPeer = {
-      name: 'initiator', // Sera renommé après
+      name: token.initiatorName || 'initiator',
       publicKey: token.pubkey,
       endpoint: token.endpoint,
       allowedIps: `${token.meshIp}/32`,
       persistentKeepalive: DEFAULT_KEEPALIVE,
     };
+
+    // Liste des peers à ajouter (initiateur + tous les autres peers existants)
+    const allPeers: MeshPeer[] = [initiatorPeer];
+
+    // Ajouter tous les peers existants du token (v3+)
+    if (token.peers && token.peers.length > 0) {
+      for (const p of token.peers) {
+        // Ne pas ajouter si c'est l'initiateur (déjà ajouté)
+        if (p.pubkey !== token.pubkey) {
+          allPeers.push({
+            name: p.name,
+            publicKey: p.pubkey,
+            endpoint: p.endpoint || undefined,
+            allowedIps: `${p.meshIp}/32`,
+            persistentKeepalive: DEFAULT_KEEPALIVE,
+          });
+        }
+      }
+    }
 
     // Créer la configuration
     this.config = {
@@ -314,7 +333,7 @@ export class MeshManager {
       clusterName: token.cluster,
       authKey: token.authkey,
       corosyncPort: token.corosyncPort,
-      peers: [initiatorPeer],
+      peers: allPeers,
     };
 
     this.saveConfig();
@@ -322,8 +341,10 @@ export class MeshManager {
     // Créer l'interface WireGuard
     createInterface(WG_INTERFACE, meshIp, keys.privateKey, port);
 
-    // Ajouter le peer initial
-    addPeer(WG_INTERFACE, initiatorPeer);
+    // Ajouter tous les peers
+    for (const peer of allPeers) {
+      addPeer(WG_INTERFACE, peer);
+    }
 
     // Générer et sauvegarder la config wg-quick pour persistance
     const wgConfig = generateWgQuickConfig(
@@ -335,9 +356,53 @@ export class MeshManager {
     saveWgQuickConfig(WG_INTERFACE, wgConfig);
     enableWgQuickService(WG_INTERFACE);
 
+    // ===== Générer la config Corosync avec tous les nœuds =====
+    const corosyncNodes: { name: string; ip: string; nodeId: number }[] = [];
+    let nodeId = 1;
+
+    // Ajouter l'initiateur comme premier nœud
+    corosyncNodes.push({
+      name: token.initiatorName || 'node1',
+      ip: token.meshIp,
+      nodeId: nodeId++,
+    });
+
+    // Ajouter tous les autres peers existants
+    if (token.peers && token.peers.length > 0) {
+      for (const p of token.peers) {
+        if (p.pubkey !== token.pubkey) {
+          corosyncNodes.push({
+            name: p.name,
+            ip: p.meshIp,
+            nodeId: nodeId++,
+          });
+        }
+      }
+    }
+
+    // Ajouter ce nœud (le nouveau joiner)
+    const localNodeName = `node${nodeId}`; // TODO: permettre de spécifier le nom
+    corosyncNodes.push({
+      name: localNodeName,
+      ip: extractMeshIp(meshIp),
+      nodeId: nodeId,
+    });
+
+    // Écrire la config Corosync
+    updateCorosyncForMesh(token.cluster, corosyncNodes, token.corosyncPort);
+
+    // Démarrer Corosync automatiquement
+    try {
+      const { execSync } = await import('child_process');
+      execSync('systemctl enable corosync', { stdio: 'pipe' });
+      execSync('systemctl start corosync', { stdio: 'pipe' });
+    } catch {
+      // Corosync sera démarré manuellement
+    }
+
     return {
       success: true,
-      message: `Rejoint le cluster "${token.cluster}" avec l'IP mesh ${meshIp}`,
+      message: `Rejoint le cluster "${token.cluster}" avec l'IP mesh ${meshIp}. ${allPeers.length} peer(s) configuré(s).`,
     };
   }
 
@@ -369,6 +434,14 @@ export class MeshManager {
       detectPublicEndpoint(this.config.listenPort) ||
       `0.0.0.0:${this.config.listenPort}`;
 
+    // Collecter tous les peers existants pour le nouveau nœud
+    const peers = this.config.peers.map((p) => ({
+      name: p.name,
+      pubkey: p.publicKey,
+      endpoint: p.endpoint || '',
+      meshIp: p.allowedIps.split('/')[0],
+    }));
+
     const token = createJoinToken({
       cluster: this.config.clusterName,
       endpoint,
@@ -379,6 +452,8 @@ export class MeshManager {
       corosyncPort: this.config.corosyncPort,
       assignedIp: ipToAssign, // IP pré-assignée pour le nouveau nœud
       usedIps, // Liste complète des IPs utilisées
+      peers, // Liste des peers existants
+      initiatorName: 'node1', // TODO: récupérer le vrai nom du nœud depuis config.yml
     });
 
     return {
@@ -429,9 +504,21 @@ export class MeshManager {
     );
     saveWgQuickConfig(WG_INTERFACE, wgConfig);
 
+    // Mettre à jour Corosync avec le nouveau nœud
+    const peerIp = peer.allowedIps.split('/')[0];
+    const nextNodeId = getNextNodeId();
+    addNodeToCorosync({
+      name: peer.name,
+      ip: peerIp,
+      nodeId: nextNodeId,
+    });
+
+    // Recharger Corosync si actif
+    reloadCorosync();
+
     return {
       success: true,
-      message: `Peer ${peer.name} ajouté avec succès.`,
+      message: `Peer ${peer.name} ajouté avec succès (nodeId: ${nextNodeId}).`,
     };
   }
 
@@ -473,6 +560,14 @@ export class MeshManager {
       this.config.peers
     );
     saveWgQuickConfig(WG_INTERFACE, wgConfig);
+
+    // Supprimer de Corosync
+    try {
+      removeNodeFromCorosync(name);
+      reloadCorosync();
+    } catch {
+      // Corosync pas configuré ou nœud pas trouvé - ignorer
+    }
 
     return {
       success: true,

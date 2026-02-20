@@ -68,16 +68,28 @@ export function checkIpConflict(ip: string, iface?: string): { conflict: boolean
   try {
     // arping -D : Duplicate Address Detection
     // -c 2 : 2 essais
-    // Retourne 0 si RÉPONSE REÇUE (IP utilisée), 1 si PAS de réponse (IP libre)
     const result = spawnSync('arping', ['-D', '-c', '2', '-I', targetIface, cleanIp], {
       timeout: 5000, // 5 secondes max
       stdio: 'pipe',
     });
     
-    // arping -D : Duplicate Address Detection
-    // Code retour 0 = PAS de réponse = IP libre
-    // Code retour 1 = réponse ARP reçue = conflit
-    return { conflict: result.status === 1 };
+    // arping -D (iputils-arping):
+    // - Exit 0: No duplicate detected (pas de réponse = IP libre)
+    // - Exit 1: Duplicate detected (réponse reçue = conflit) OU timeout
+    // - Exit 2: Erreur
+    // 
+    // PROBLÈME: Exit 1 est aussi retourné sur timeout sans réponse.
+    // Solution: vérifier la SORTIE pour "Unicast reply" ou "reply from"
+    const output = result.stdout?.toString() + result.stderr?.toString() || '';
+    
+    // Si on voit une réponse dans la sortie, c'est un conflit
+    if (output.toLowerCase().includes('reply from') || 
+        output.toLowerCase().includes('unicast reply')) {
+      return { conflict: true };
+    }
+    
+    // Si exit 0 ou timeout sans réponse, IP libre
+    return { conflict: false };
   } catch (error: any) {
     return { conflict: false, error: `Erreur arping: ${error.message}` };
   }

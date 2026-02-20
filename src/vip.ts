@@ -23,16 +23,21 @@ export interface VipState {
 // Helpers
 // ============================================
 
-function runCommand(cmd: string): boolean {
+interface CommandResult {
+  success: boolean;
+  stderr: string;
+}
+
+function runCommand(cmd: string): CommandResult {
   try {
     execSync(cmd, {
       encoding: 'utf-8',
       timeout: 10000,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    return true;
-  } catch {
-    return false;
+    return { success: true, stderr: '' };
+  } catch (error: any) {
+    return { success: false, stderr: error.stderr || error.message || 'Unknown error' };
   }
 }
 
@@ -74,9 +79,21 @@ export function addVip(vip: VipConfig, log: (msg: string) => void = console.log)
 
   // Ajouter l'IP
   const addCmd = `ip addr add ${vip.ip}/${vip.cidr} dev ${vip.interface}`;
-  if (!runCommand(addCmd)) {
+  const result = runCommand(addCmd);
+  if (!result.success) {
+    log(`Erreur: échec de la commande '${addCmd}'`);
+    log(`Détail: ${result.stderr}`);
     return false;
   }
+
+  // Vérifier que l'IP a bien été ajoutée
+  if (!hasVip(vip)) {
+    const errorMsg = `Erreur: VIP ${vip.ip} n'est pas présente sur ${vip.interface} après ajout`;
+    log(errorMsg);
+    throw new Error(errorMsg);
+  }
+
+  log(`VIP ${vip.ip} vérifiée présente sur ${vip.interface}`);
 
   // Envoyer des gratuitous ARP pour annoncer la VIP
   sendGratuitousArp(vip);
@@ -98,7 +115,9 @@ export function removeVip(vip: VipConfig, log: (msg: string) => void = console.l
   log(t('vip.removing', { ip: vip.ip }));
 
   const delCmd = `ip addr del ${vip.ip}/${vip.cidr} dev ${vip.interface}`;
-  if (!runCommand(delCmd)) {
+  const result = runCommand(delCmd);
+  if (!result.success) {
+    log(`Erreur suppression VIP: ${result.stderr}`);
     return false;
   }
 
@@ -115,6 +134,7 @@ export function sendGratuitousArp(vip: VipConfig): void {
   // -c 3 : envoyer 3 paquets
   // -U : unsolicited ARP (gratuitous)
   // -I : interface source
+  // Note: On ignore les erreurs car arping peut échouer sans gravité
   runCommand(`arping -c 3 -U -I ${vip.interface} ${vip.ip}`);
   
   // Aussi avec -A pour les systèmes qui l'attendent

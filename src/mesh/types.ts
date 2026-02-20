@@ -31,6 +31,16 @@ export interface MeshConfig {
 }
 
 /**
+ * Informations d'un peer dans le token
+ */
+export interface TokenPeer {
+  name: string;
+  pubkey: string;
+  endpoint: string;
+  meshIp: string;
+}
+
+/**
  * Token de join (JSON base64)
  */
 export interface JoinToken {
@@ -46,6 +56,10 @@ export interface JoinToken {
   assignedIp?: string;
   /** Liste des IPs déjà utilisées dans le mesh (v2+) */
   usedIps?: string[];
+  /** Liste des peers existants dans le cluster (v3+) */
+  peers?: TokenPeer[];
+  /** Nom du nœud initiateur (v3+) */
+  initiatorName?: string;
 }
 
 /**
