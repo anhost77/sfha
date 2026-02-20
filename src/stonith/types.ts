@@ -44,14 +44,35 @@ export interface ProxmoxStonithConfig {
   pveNode: string;
 }
 
+export interface WebhookStonithConfig {
+  /** URL pour fence (power off) - {{node}} et {{action}} seront remplacés */
+  fenceUrl: string;
+  /** URL pour unfence (power on) - {{node}} et {{action}} seront remplacés */
+  unfenceUrl: string;
+  /** URL pour status (optionnel) - {{node}} sera remplacé */
+  statusUrl?: string;
+  /** Méthode HTTP (défaut: POST) */
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  /** Headers personnalisés */
+  headers?: Record<string, string>;
+  /** Template du body - {{node}} et {{action}} seront remplacés */
+  bodyTemplate?: string;
+  /** Timeout en secondes (défaut: 30) */
+  timeout: number;
+  /** Vérifier le certificat SSL (défaut: true) */
+  verifySsl: boolean;
+}
+
 export interface StonithConfig {
   /** STONITH activé */
   enabled: boolean;
-  /** Provider (proxmox pour l'instant) */
-  provider: 'proxmox';
+  /** Provider */
+  provider: 'proxmox' | 'webhook';
   /** Config spécifique Proxmox */
   proxmox?: ProxmoxStonithConfig;
-  /** Mapping nœud sfha -> config VM/CT */
+  /** Config spécifique Webhook */
+  webhook?: WebhookStonithConfig;
+  /** Mapping nœud sfha -> config VM/CT (requis pour proxmox, optionnel pour webhook) */
   nodes: Record<string, Omit<NodeStonithConfig, 'name'>>;
   /** Paramètres de sécurité */
   safety: StonithSafetyConfig;

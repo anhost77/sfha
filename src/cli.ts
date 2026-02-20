@@ -15,17 +15,18 @@ import { initI18n, t } from './i18n.js';
 import { getMeshManager, isWireGuardInstalled } from './mesh/index.js';
 import { isServiceActive } from './resources.js';
 import { logger } from './utils/logger.js';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import * as readline from 'readline';
 import { execSync, spawn } from 'child_process';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 // ============================================
 // Version
 // ============================================
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.3';
 
 function getVersion(): string {
   return VERSION;
@@ -282,6 +283,7 @@ function configCheckCommand(options: { config?: string; lang?: string }): void {
     console.log(`  Nœud: ${config.node.name}`);
     console.log(`  VIPs: ${config.vips.length}`);
     console.log(`  Services: ${config.services.length}`);
+    console.log(`  Health Checks: ${config.healthChecks.length}`);
     console.log(`  Contraintes: ${config.constraints.length}`);
   } catch (error: any) {
     console.error(colorize('✗', 'red'), 'Configuration invalide:', error.message);
@@ -720,6 +722,472 @@ async function stonithHistoryCommand(options: { json?: boolean; limit?: number; 
 }
 
 // ============================================
+// STONITH Setup Command (interactive)
+// ============================================
+
+/**
+ * Helper pour poser une question interactive
+ */
+function prompt(rl: readline.Interface, question: string, defaultValue?: string): Promise<string> {
+  const displayQuestion = defaultValue 
+    ? `${question} ${colorize(`[${defaultValue}]`, 'gray')}: `
+    : `${question}: `;
+  
+  return new Promise((resolve) => {
+    rl.question(displayQuestion, (answer) => {
+      resolve(answer.trim() || defaultValue || '');
+    });
+  });
+}
+
+/**
+ * Helper pour poser une question avec choix
+ */
+function promptChoice(rl: readline.Interface, question: string, choices: string[], defaultChoice?: string): Promise<string> {
+  const choiceStr = choices.map(c => c === defaultChoice ? colorize(c, 'cyan') : c).join('/');
+  const displayQuestion = `${question} (${choiceStr}): `;
+  
+  return new Promise((resolve) => {
+    const ask = () => {
+      rl.question(displayQuestion, (answer) => {
+        const value = answer.trim().toLowerCase() || defaultChoice || '';
+        if (choices.includes(value)) {
+          resolve(value);
+        } else {
+          console.log(colorize('  Choix invalide. Options:', 'yellow'), choices.join(', '));
+          ask();
+        }
+      });
+    };
+    ask();
+  });
+}
+
+/**
+ * Setup interactif pour le provider Webhook
+ */
+async function setupWebhookProvider(rl: readline.Interface, configPath: string): Promise<void> {
+  console.log('');
+  console.log(colorize('Configuration Webhook', 'blue'));
+  console.log('─'.repeat(40));
+  console.log(colorize('  Note:', 'gray'), '{{node}} et {{action}} seront remplacés dans les URLs et le body');
+  console.log('');
+
+  // Fence URL
+  const fenceUrl = await prompt(rl, 'URL de fence (power off)');
+  if (!fenceUrl) {
+    console.error(colorize('Erreur:', 'red'), 'URL de fence requise');
+    process.exit(1);
+  }
+
+  // Unfence URL
+  const unfenceUrl = await prompt(rl, 'URL de unfence (power on)');
+  if (!unfenceUrl) {
+    console.error(colorize('Erreur:', 'red'), 'URL de unfence requise');
+    process.exit(1);
+  }
+
+  // Status URL (optionnel)
+  console.log(colorize('  Optionnel:', 'gray'), 'URL pour vérifier l\'état d\'un nœud');
+  const statusUrl = await prompt(rl, 'URL de status (optionnel)');
+
+  // Méthode HTTP
+  const method = await promptChoice(rl, 'Méthode HTTP', ['POST', 'GET', 'PUT', 'DELETE'], 'POST');
+
+  // Headers
+  console.log('');
+  console.log(colorize('Headers HTTP (optionnel)', 'blue'));
+  console.log(colorize('  Exemple:', 'gray'), 'Authorization: Bearer your-token');
+  
+  const headers: Record<string, string> = {};
+  let addMoreHeaders = true;
+  
+  while (addMoreHeaders) {
+    const headerLine = await prompt(rl, 'Header (format: Nom: Valeur, vide pour terminer)');
+    if (!headerLine) {
+      addMoreHeaders = false;
+    } else {
+      const colonIndex = headerLine.indexOf(':');
+      if (colonIndex > 0) {
+        const name = headerLine.slice(0, colonIndex).trim();
+        const value = headerLine.slice(colonIndex + 1).trim();
+        headers[name] = value;
+        console.log(colorize('  ✓', 'green'), `${name}: ${value}`);
+      } else {
+        console.log(colorize('  ⚠️', 'yellow'), 'Format invalide, utilisez "Nom: Valeur"');
+      }
+    }
+  }
+
+  // Body template
+  console.log('');
+  console.log(colorize('Body template (optionnel)', 'blue'));
+  console.log(colorize('  Exemple:', 'gray'), '{"node": "{{node}}", "action": "{{action}}"}');
+  const bodyTemplate = await prompt(rl, 'Body template');
+
+  // Timeout
+  const timeoutStr = await prompt(rl, 'Timeout (secondes)', '30');
+  const timeout = parseInt(timeoutStr, 10) || 30;
+
+  // Verify SSL
+  const verifySslStr = await promptChoice(rl, 'Vérifier SSL', ['oui', 'non'], 'oui');
+  const verifySsl = verifySslStr === 'oui';
+
+  // Nom du nœud local (optionnel pour webhook, mais utile)
+  console.log('');
+  console.log(colorize('Configuration locale (optionnel)', 'blue'));
+  console.log('─'.repeat(40));
+  
+  let nodeName = '';
+  if (existsSync(configPath)) {
+    try {
+      const existingConfig = parseYaml(readFileSync(configPath, 'utf-8'));
+      if (existingConfig?.node?.name) {
+        console.log(colorize('  ℹ️', 'blue'), `Nom du nœud détecté: ${existingConfig.node.name}`);
+        nodeName = existingConfig.node.name;
+      }
+    } catch {}
+  }
+
+  rl.close();
+
+  // Construire la config STONITH
+  const stonithSection: any = {
+    enabled: true,
+    provider: 'webhook',
+    webhook: {
+      fence_url: fenceUrl,
+      unfence_url: unfenceUrl,
+      ...(statusUrl ? { status_url: statusUrl } : {}),
+      method,
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(bodyTemplate ? { body_template: bodyTemplate } : {}),
+      timeout,
+      verify_ssl: verifySsl,
+    },
+    nodes: {},
+    safety: {
+      require_quorum: true,
+      min_delay_between_fence: 60,
+      max_fences_per_5min: 2,
+      startup_grace_period: 120,
+      fence_delay_on_node_left: 10,
+    },
+  };
+
+  // Ajouter le nœud local si connu
+  if (nodeName) {
+    stonithSection.nodes[nodeName] = {
+      type: 'lxc',
+      vmid: 0, // Pas utilisé pour webhook
+    };
+  }
+
+  // Mettre à jour ou créer la config
+  console.log('');
+  
+  if (existsSync(configPath)) {
+    let existingConfig: any;
+    try {
+      existingConfig = parseYaml(readFileSync(configPath, 'utf-8'));
+    } catch (err: any) {
+      console.error(colorize('Erreur:', 'red'), `Impossible de lire ${configPath}: ${err.message}`);
+      process.exit(1);
+    }
+
+    // Fusionner les nœuds
+    if (existingConfig.stonith?.nodes) {
+      stonithSection.nodes = {
+        ...existingConfig.stonith.nodes,
+        ...stonithSection.nodes,
+      };
+    }
+
+    existingConfig.stonith = stonithSection;
+
+    try {
+      writeFileSync(configPath, stringifyYaml(existingConfig, { indent: 2 }));
+      console.log(colorize('✓', 'green'), `Configuration STONITH Webhook ajoutée à ${configPath}`);
+    } catch (err: any) {
+      console.error(colorize('Erreur:', 'red'), `Impossible d'écrire ${configPath}: ${err.message}`);
+      console.log('');
+      console.log(colorize('Configuration générée:', 'yellow'));
+      console.log('');
+      console.log(stringifyYaml({ stonith: stonithSection }, { indent: 2 }));
+      process.exit(1);
+    }
+  } else {
+    console.log(colorize('⚠️', 'yellow'), `Le fichier ${configPath} n'existe pas.`);
+    console.log('');
+    console.log(colorize('Ajoutez cette section à votre configuration:', 'blue'));
+    console.log('');
+    console.log(stringifyYaml({ stonith: stonithSection }, { indent: 2 }));
+  }
+
+  // Afficher le résumé
+  console.log('');
+  console.log(box([
+    'Configuration STONITH Webhook',
+    '─'.repeat(36),
+    `Fence URL: ${fenceUrl.slice(0, 30)}...`,
+    `Unfence URL: ${unfenceUrl.slice(0, 28)}...`,
+    `Méthode: ${method}`,
+    `Headers: ${Object.keys(headers).length}`,
+    `Timeout: ${timeout}s`,
+    `SSL: ${verifySsl ? 'vérifié' : 'ignoré'}`,
+  ], 44));
+
+  console.log('');
+  console.log(colorize('Prochaines étapes:', 'blue'));
+  console.log('  1. Vérifiez la configuration avec: sfha config-check');
+  console.log('  2. Redémarrez sfha: systemctl restart sfha');
+  console.log('  3. Vérifiez le statut STONITH: sfha stonith status');
+}
+
+async function stonithSetupCommand(provider: string | undefined, options: { config?: string; lang?: string }): Promise<void> {
+  initI18n(options.lang);
+  
+  const configPath = options.config || '/etc/sfha/config.yml';
+  
+  console.log(box([
+    'STONITH Setup',
+    '─'.repeat(36),
+    'Configuration interactive de STONITH',
+    '(Shoot The Other Node In The Head)',
+  ], 44));
+  console.log('');
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  try {
+    // Demander le provider si pas fourni
+    let selectedProvider = provider;
+    if (!selectedProvider) {
+      console.log(colorize('Providers disponibles:', 'blue'));
+      console.log('  • proxmox - API Proxmox VE (LXC/QEMU)');
+      console.log('  • webhook - API externe via HTTP');
+      console.log('');
+      selectedProvider = await promptChoice(rl, 'Provider', ['proxmox', 'webhook'], 'proxmox');
+    }
+
+    if (selectedProvider !== 'proxmox' && selectedProvider !== 'webhook') {
+      console.error(colorize('Erreur:', 'red'), `Provider "${selectedProvider}" non supporté.`);
+      process.exit(1);
+    }
+
+    // === WEBHOOK SETUP ===
+    if (selectedProvider === 'webhook') {
+      await setupWebhookProvider(rl, configPath);
+      return;
+    }
+
+    // === PROXMOX SETUP ===
+    console.log('');
+    console.log(colorize('Configuration Proxmox', 'blue'));
+    console.log('─'.repeat(40));
+
+    // URL API
+    const apiUrl = await prompt(rl, 'URL API Proxmox', 'https://192.168.1.100:8006');
+
+    // Token ID
+    console.log(colorize('  Format token:', 'gray'), 'user@realm!tokenid (ex: root@pam!sfha)');
+    const tokenId = await prompt(rl, 'Token ID');
+    if (!tokenId) {
+      console.error(colorize('Erreur:', 'red'), 'Token ID requis');
+      process.exit(1);
+    }
+
+    // Token secret
+    console.log(colorize('  Conseil:', 'gray'), 'Utiliser un fichier pour le secret est plus sécurisé');
+    const secretMethod = await promptChoice(rl, 'Méthode', ['direct', 'fichier'], 'direct');
+    
+    let tokenSecret: string | undefined;
+    let tokenSecretFile: string | undefined;
+    
+    if (secretMethod === 'fichier') {
+      tokenSecretFile = await prompt(rl, 'Chemin du fichier secret', '/etc/sfha/proxmox.secret');
+      if (!existsSync(tokenSecretFile)) {
+        console.log(colorize('  ⚠️', 'yellow'), `Le fichier ${tokenSecretFile} n'existe pas.`);
+        const createIt = await promptChoice(rl, 'Le créer maintenant?', ['oui', 'non'], 'oui');
+        if (createIt === 'oui') {
+          const secret = await prompt(rl, 'Token secret');
+          try {
+            const dir = dirname(tokenSecretFile);
+            if (!existsSync(dir)) {
+              mkdirSync(dir, { recursive: true });
+            }
+            writeFileSync(tokenSecretFile, secret, { mode: 0o600 });
+            console.log(colorize('  ✓', 'green'), `Secret écrit dans ${tokenSecretFile}`);
+          } catch (err: any) {
+            console.error(colorize('  ✗', 'red'), `Impossible d'écrire le fichier: ${err.message}`);
+            console.log(colorize('  →', 'yellow'), 'Passé en mode direct');
+            tokenSecret = secret;
+            tokenSecretFile = undefined;
+          }
+        }
+      }
+    } else {
+      tokenSecret = await prompt(rl, 'Token secret');
+      if (!tokenSecret) {
+        console.error(colorize('Erreur:', 'red'), 'Token secret requis');
+        process.exit(1);
+      }
+    }
+
+    // PVE Node
+    console.log(colorize('  Note:', 'gray'), 'C\'est le nom du serveur Proxmox, pas du guest');
+    const pveNode = await prompt(rl, 'Nom du nœud PVE', 'pve');
+
+    // Ce nœud
+    console.log('');
+    console.log(colorize('Configuration de ce nœud', 'blue'));
+    console.log('─'.repeat(40));
+
+    // Auto-détection VMID
+    const detectedVmid = detectVmid();
+    let vmid: string;
+    if (detectedVmid) {
+      console.log(colorize('  ℹ️', 'blue'), `VMID auto-détecté: ${detectedVmid}`);
+      vmid = await prompt(rl, 'VMID de ce nœud', detectedVmid);
+    } else {
+      vmid = await prompt(rl, 'VMID de ce nœud');
+    }
+    if (!vmid) {
+      console.error(colorize('Erreur:', 'red'), 'VMID requis');
+      process.exit(1);
+    }
+
+    // Type
+    const vmType = await promptChoice(rl, 'Type', ['lxc', 'qemu'], 'lxc');
+
+    // Nom du nœud (pour le mapping)
+    let nodeName: string;
+    if (existsSync(configPath)) {
+      try {
+        const existingConfig = parseYaml(readFileSync(configPath, 'utf-8'));
+        if (existingConfig?.node?.name) {
+          console.log(colorize('  ℹ️', 'blue'), `Nom du nœud détecté dans config: ${existingConfig.node.name}`);
+          nodeName = await prompt(rl, 'Nom de ce nœud', existingConfig.node.name);
+        } else {
+          nodeName = await prompt(rl, 'Nom de ce nœud');
+        }
+      } catch {
+        nodeName = await prompt(rl, 'Nom de ce nœud');
+      }
+    } else {
+      nodeName = await prompt(rl, 'Nom de ce nœud');
+    }
+    if (!nodeName) {
+      console.error(colorize('Erreur:', 'red'), 'Nom du nœud requis');
+      process.exit(1);
+    }
+
+    rl.close();
+
+    // Construire la config STONITH
+    const stonithSection = {
+      enabled: true,
+      provider: 'proxmox',
+      proxmox: {
+        api_url: apiUrl,
+        token_id: tokenId,
+        ...(tokenSecretFile ? { token_secret_file: tokenSecretFile } : { token_secret: tokenSecret }),
+        verify_ssl: false,
+        pve_node: pveNode,
+      },
+      nodes: {
+        [nodeName]: {
+          type: vmType,
+          vmid: parseInt(vmid, 10),
+        },
+      },
+      safety: {
+        require_quorum: true,
+        min_delay_between_fence: 60,
+        max_fences_per_5min: 2,
+        startup_grace_period: 120,
+        fence_delay_on_node_left: 10,
+      },
+    };
+
+    // Mettre à jour ou créer la config
+    console.log('');
+    
+    if (existsSync(configPath)) {
+      // Lire la config existante
+      let existingConfig: any;
+      try {
+        existingConfig = parseYaml(readFileSync(configPath, 'utf-8'));
+      } catch (err: any) {
+        console.error(colorize('Erreur:', 'red'), `Impossible de lire ${configPath}: ${err.message}`);
+        process.exit(1);
+      }
+
+      // Fusionner intelligemment les nœuds STONITH
+      if (existingConfig.stonith?.nodes) {
+        stonithSection.nodes = {
+          ...existingConfig.stonith.nodes,
+          ...stonithSection.nodes,
+        };
+      }
+
+      // Mettre à jour la section stonith
+      existingConfig.stonith = stonithSection;
+
+      // Écrire la config
+      try {
+        writeFileSync(configPath, stringifyYaml(existingConfig, { indent: 2 }));
+        console.log(colorize('✓', 'green'), `Configuration STONITH ajoutée à ${configPath}`);
+      } catch (err: any) {
+        console.error(colorize('Erreur:', 'red'), `Impossible d'écrire ${configPath}: ${err.message}`);
+        console.log('');
+        console.log(colorize('Configuration générée (à ajouter manuellement):', 'yellow'));
+        console.log('');
+        console.log(stringifyYaml({ stonith: stonithSection }, { indent: 2 }));
+        process.exit(1);
+      }
+    } else {
+      // Le fichier n'existe pas, afficher la config à ajouter
+      console.log(colorize('⚠️', 'yellow'), `Le fichier ${configPath} n'existe pas.`);
+      console.log('');
+      console.log(colorize('Ajoutez cette section à votre configuration:', 'blue'));
+      console.log('');
+      console.log(stringifyYaml({ stonith: stonithSection }, { indent: 2 }));
+    }
+
+    // Afficher le résumé
+    console.log('');
+    console.log(box([
+      'Configuration STONITH',
+      '─'.repeat(36),
+      `Provider: ${selectedProvider}`,
+      `API: ${apiUrl}`,
+      `Token: ${tokenId}`,
+      `PVE Node: ${pveNode}`,
+      '',
+      `Ce nœud: ${nodeName}`,
+      `VMID: ${vmid} (${vmType})`,
+    ], 44));
+
+    console.log('');
+    console.log(colorize('Prochaines étapes:', 'blue'));
+    console.log('  1. Vérifiez la configuration avec: sfha config-check');
+    console.log('  2. Redémarrez sfha: systemctl restart sfha');
+    console.log('  3. Vérifiez le statut STONITH: sfha stonith status');
+    console.log('');
+    console.log(colorize('⚠️  Important:', 'yellow'), 'Configurez les autres nœuds du cluster avec leurs VMID respectifs.');
+
+  } catch (error: any) {
+    rl.close();
+    console.error(colorize('Erreur:', 'red'), error.message);
+    process.exit(1);
+  }
+}
+
+// ============================================
 // Main
 // ============================================
 
@@ -835,6 +1303,12 @@ stonith
   .option('-n, --limit <n>', 'Nombre d\'entrées', '20')
   .action((options) => stonithHistoryCommand({ ...options, limit: parseInt(options.limit) }));
 
+stonith
+  .command('setup [provider]')
+  .description('Configuration interactive STONITH')
+  .option('-c, --config <path>', 'Chemin de la configuration', '/etc/sfha/config.yml')
+  .action(stonithSetupCommand);
+
 // ============================================
 // Init Command
 // ============================================
@@ -847,6 +1321,22 @@ program
   .option('--ip <ip>', 'IP mesh locale avec CIDR (ex: 10.100.0.1/24)')
   .option('--port <port>', 'Port WireGuard (défaut: 51820)', '51820')
   .option('--endpoint <endpoint>', 'Endpoint public (auto-détecté si absent)')
+  // Options STONITH
+  .option('--stonith <provider>', 'Activer STONITH (proxmox|webhook)')
+  // Options Proxmox
+  .option('--proxmox-url <url>', 'URL API Proxmox')
+  .option('--proxmox-token <id>', 'Token ID (ex: root@pam!sfha)')
+  .option('--proxmox-secret <secret>', 'Token secret')
+  .option('--proxmox-secret-file <path>', 'Fichier contenant le secret')
+  .option('--pve-node <name>', 'Nom du nœud PVE')
+  .option('--vmid <id>', 'VMID de ce container/VM')
+  .option('--vm-type <type>', 'Type: lxc ou qemu (défaut: lxc)', 'lxc')
+  // Options Webhook
+  .option('--webhook-fence-url <url>', 'URL de fence pour webhook')
+  .option('--webhook-unfence-url <url>', 'URL de unfence pour webhook')
+  .option('--webhook-method <method>', 'Méthode HTTP (défaut: POST)', 'POST')
+  .option('--webhook-header <header>', 'Header HTTP (format: Nom:Valeur, répétable)')
+  .option('--webhook-body <template>', 'Body template avec {{node}} et {{action}}')
   .action(initCommand);
 
 async function initCommand(options: {
@@ -856,8 +1346,112 @@ async function initCommand(options: {
   port?: string;
   endpoint?: string;
   lang?: string;
+  // STONITH options
+  stonith?: string;
+  // Proxmox options
+  proxmoxUrl?: string;
+  proxmoxToken?: string;
+  proxmoxSecret?: string;
+  proxmoxSecretFile?: string;
+  pveNode?: string;
+  vmid?: string;
+  vmType?: string;
+  // Webhook options
+  webhookFenceUrl?: string;
+  webhookUnfenceUrl?: string;
+  webhookMethod?: string;
+  webhookHeader?: string | string[];
+  webhookBody?: string;
 }): Promise<void> {
   initI18n(options.lang);
+
+  // Générer le bloc STONITH si demandé
+  let stonithConfig: string | null = null;
+  if (options.stonith) {
+    if (options.stonith !== 'proxmox' && options.stonith !== 'webhook') {
+      console.error(colorize('Erreur:', 'red'), 'Provider STONITH inconnu. Utilisez "proxmox" ou "webhook".');
+      process.exit(1);
+    }
+
+    if (options.stonith === 'webhook') {
+      // === WEBHOOK ===
+      if (!options.webhookFenceUrl) {
+        console.error(colorize('Erreur:', 'red'), '--webhook-fence-url est requis avec --stonith webhook');
+        process.exit(1);
+      }
+      if (!options.webhookUnfenceUrl) {
+        console.error(colorize('Erreur:', 'red'), '--webhook-unfence-url est requis avec --stonith webhook');
+        process.exit(1);
+      }
+
+      // Parser les headers
+      const headers: Record<string, string> = {};
+      if (options.webhookHeader) {
+        const headerList = Array.isArray(options.webhookHeader) 
+          ? options.webhookHeader 
+          : [options.webhookHeader];
+        for (const h of headerList) {
+          const colonIdx = h.indexOf(':');
+          if (colonIdx > 0) {
+            headers[h.slice(0, colonIdx).trim()] = h.slice(colonIdx + 1).trim();
+          }
+        }
+      }
+
+      stonithConfig = generateWebhookStonithYaml({
+        fenceUrl: options.webhookFenceUrl,
+        unfenceUrl: options.webhookUnfenceUrl,
+        method: (options.webhookMethod as 'GET' | 'POST' | 'PUT' | 'DELETE') || 'POST',
+        headers,
+        bodyTemplate: options.webhookBody,
+        nodeName: options.name,
+      });
+    } else {
+      // === PROXMOX ===
+      // Valider les options requises
+      if (!options.proxmoxUrl) {
+        console.error(colorize('Erreur:', 'red'), '--proxmox-url est requis avec --stonith proxmox');
+        process.exit(1);
+      }
+      if (!options.proxmoxToken) {
+        console.error(colorize('Erreur:', 'red'), '--proxmox-token est requis avec --stonith proxmox');
+        process.exit(1);
+      }
+      if (!options.proxmoxSecret && !options.proxmoxSecretFile) {
+        console.error(colorize('Erreur:', 'red'), '--proxmox-secret ou --proxmox-secret-file est requis avec --stonith proxmox');
+        process.exit(1);
+      }
+      if (!options.pveNode) {
+        console.error(colorize('Erreur:', 'red'), '--pve-node est requis avec --stonith proxmox');
+        process.exit(1);
+      }
+
+      // Auto-détecter VMID si pas fourni
+      let vmid = options.vmid;
+      if (!vmid) {
+        const detected = detectVmid();
+        if (detected) {
+          vmid = detected;
+          console.log(colorize('ℹ', 'blue'), `VMID auto-détecté: ${vmid}`);
+        } else {
+          console.error(colorize('Erreur:', 'red'), '--vmid est requis (auto-détection impossible)');
+          process.exit(1);
+        }
+      }
+
+      stonithConfig = generateStonithYaml({
+        provider: 'proxmox',
+        proxmoxUrl: options.proxmoxUrl,
+        proxmoxToken: options.proxmoxToken,
+        proxmoxSecret: options.proxmoxSecret,
+        proxmoxSecretFile: options.proxmoxSecretFile,
+        pveNode: options.pveNode,
+        vmid,
+        vmType: (options.vmType as 'lxc' | 'qemu') || 'lxc',
+        nodeName: options.name,
+      });
+    }
+  }
 
   if (options.mesh) {
     // Initialisation avec mesh WireGuard
@@ -894,16 +1488,179 @@ async function initCommand(options: {
     console.log('Pour ajouter un nœud au cluster, exécutez sur le nouveau nœud:');
     console.log(`  sfha join ${result.token}`);
     console.log('');
+    
+    if (stonithConfig) {
+      console.log(colorize('Configuration STONITH à ajouter:', 'blue'));
+      console.log('');
+      console.log(stonithConfig);
+      console.log('');
+    }
+    
     console.log(colorize('Note:', 'yellow'), 'Configurez /etc/sfha/config.yml puis démarrez sfha.');
   } else {
     // Initialisation sans mesh (juste créer la config)
     console.log(colorize('✓', 'green'), `Cluster "${options.name}" initialisé.`);
     console.log('');
+    
+    if (stonithConfig) {
+      console.log(colorize('Configuration STONITH à ajouter dans config.yml:', 'blue'));
+      console.log('');
+      console.log(stonithConfig);
+      console.log('');
+    }
+    
     console.log('Créez /etc/sfha/config.yml avec:');
     console.log('  sfha config-example > /etc/sfha/config.yml');
     console.log('');
     console.log('Puis configurez Corosync manuellement ou utilisez --mesh pour un mesh automatique.');
   }
+}
+
+/**
+ * Génère le YAML pour la section STONITH
+ */
+function generateStonithYaml(opts: {
+  provider: 'proxmox';
+  proxmoxUrl: string;
+  proxmoxToken: string;
+  proxmoxSecret?: string;
+  proxmoxSecretFile?: string;
+  pveNode: string;
+  vmid: string;
+  vmType: 'lxc' | 'qemu';
+  nodeName: string;
+}): string {
+  const lines: string[] = [
+    '# STONITH - Shoot The Other Node In The Head',
+    'stonith:',
+    '  enabled: true',
+    `  provider: ${opts.provider}`,
+    '',
+    '  proxmox:',
+    `    api_url: ${opts.proxmoxUrl}`,
+    `    token_id: ${opts.proxmoxToken}`,
+  ];
+
+  if (opts.proxmoxSecretFile) {
+    lines.push(`    token_secret_file: ${opts.proxmoxSecretFile}`);
+  } else if (opts.proxmoxSecret) {
+    lines.push(`    token_secret: ${opts.proxmoxSecret}`);
+  }
+
+  lines.push(
+    '    verify_ssl: false',
+    `    pve_node: ${opts.pveNode}`,
+    '',
+    '  # Mapping nœud sfha -> VM/CT Proxmox',
+    '  nodes:',
+    `    ${opts.nodeName}:`,
+    `      type: ${opts.vmType}`,
+    `      vmid: ${opts.vmid}`,
+    '',
+    '  # Paramètres de sécurité',
+    '  safety:',
+    '    require_quorum: true',
+    '    min_delay_between_fence: 60',
+    '    max_fences_per_5min: 2',
+    '    startup_grace_period: 120',
+    '    fence_delay_on_node_left: 10',
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * Génère le YAML pour la section STONITH Webhook
+ */
+function generateWebhookStonithYaml(opts: {
+  fenceUrl: string;
+  unfenceUrl: string;
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  headers?: Record<string, string>;
+  bodyTemplate?: string;
+  nodeName: string;
+}): string {
+  const lines: string[] = [
+    '# STONITH - Shoot The Other Node In The Head',
+    'stonith:',
+    '  enabled: true',
+    '  provider: webhook',
+    '',
+    '  webhook:',
+    `    fence_url: ${opts.fenceUrl}`,
+    `    unfence_url: ${opts.unfenceUrl}`,
+    `    method: ${opts.method}`,
+  ];
+
+  // Ajouter les headers si présents
+  if (opts.headers && Object.keys(opts.headers).length > 0) {
+    lines.push('    headers:');
+    for (const [name, value] of Object.entries(opts.headers)) {
+      lines.push(`      ${name}: ${value}`);
+    }
+  }
+
+  // Ajouter le body template si présent
+  if (opts.bodyTemplate) {
+    lines.push(`    body_template: '${opts.bodyTemplate}'`);
+  }
+
+  lines.push(
+    '    timeout: 30',
+    '    verify_ssl: true',
+    '',
+    '  # Mapping nœuds (optionnel pour webhook)',
+    '  nodes:',
+    `    ${opts.nodeName}:`,
+    '      type: lxc',
+    '      vmid: 0',
+    '',
+    '  # Paramètres de sécurité',
+    '  safety:',
+    '    require_quorum: true',
+    '    min_delay_between_fence: 60',
+    '    max_fences_per_5min: 2',
+    '    startup_grace_period: 120',
+    '    fence_delay_on_node_left: 10',
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * Tente de détecter le VMID si on est dans un container LXC Proxmox
+ */
+function detectVmid(): string | null {
+  // Méthode 1: /etc/pve/.vmid (parfois présent)
+  try {
+    if (existsSync('/etc/pve/.vmid')) {
+      return readFileSync('/etc/pve/.vmid', 'utf-8').trim();
+    }
+  } catch {}
+
+  // Méthode 2: hostname contient le VMID (convention node1 -> vmid pas déductible)
+  // Skip this approach
+
+  // Méthode 3: lire /proc/1/cpuset pour containers LXC
+  try {
+    const cpuset = readFileSync('/proc/1/cpuset', 'utf-8').trim();
+    // Format: /lxc/210 ou /lxc.payload/210
+    const match = cpuset.match(/\/lxc(?:\.payload)?\/(\d+)/);
+    if (match) {
+      return match[1];
+    }
+  } catch {}
+
+  // Méthode 4: /sys/class/dmi/id/product_serial pour VMs QEMU Proxmox
+  try {
+    const serial = readFileSync('/sys/class/dmi/id/product_serial', 'utf-8').trim();
+    // Proxmox met parfois le VMID ici
+    if (/^\d+$/.test(serial)) {
+      return serial;
+    }
+  } catch {}
+
+  return null;
 }
 
 // ============================================

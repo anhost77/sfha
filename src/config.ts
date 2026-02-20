@@ -10,11 +10,12 @@ import {
   StonithConfig,
   StonithSafetyConfig,
   ProxmoxStonithConfig,
+  WebhookStonithConfig,
   DEFAULT_STONITH_SAFETY,
 } from './stonith/types.js';
 
 // Re-export STONITH types
-export type { StonithConfig, StonithSafetyConfig, ProxmoxStonithConfig };
+export type { StonithConfig, StonithSafetyConfig, ProxmoxStonithConfig, WebhookStonithConfig };
 
 // ============================================
 // Types
@@ -28,6 +29,19 @@ export interface VipConfig {
 }
 
 export interface HealthCheckConfig {
+  type: 'http' | 'tcp' | 'systemd';
+  target: string;
+  intervalMs: number;
+  timeoutMs: number;
+  failuresBeforeUnhealthy: number;
+  successesBeforeHealthy: number;
+}
+
+/**
+ * Health check standalone (au niveau racine, pas lié à un service)
+ */
+export interface StandaloneHealthCheck {
+  name: string;
   type: 'http' | 'tcp' | 'systemd';
   target: string;
   intervalMs: number;
@@ -70,6 +84,7 @@ export interface SfhaConfig {
   };
   vips: VipConfig[];
   services: ServiceConfig[];
+  healthChecks: StandaloneHealthCheck[];
   constraints: Constraint[];
   stonith?: StonithConfig;
   logging: {
@@ -94,6 +109,7 @@ const defaultConfig: Partial<SfhaConfig> = {
   },
   vips: [],
   services: [],
+  healthChecks: [],
   constraints: [],
   logging: {
     level: 'info',
@@ -139,6 +155,7 @@ function normalizeConfig(raw: any): SfhaConfig {
     },
     vips: (raw.vips || []).map(normalizeVip),
     services: (raw.services || []).map(normalizeService),
+    healthChecks: (raw.health_checks || []).map(normalizeStandaloneHealthCheck),
     constraints: (raw.constraints || []).map(normalizeConstraint),
     stonith: raw.stonith ? normalizeStonith(raw.stonith) : undefined,
     logging: {
@@ -176,6 +193,20 @@ function normalizeStonith(raw: any): StonithConfig {
       tokenSecretFile: raw.proxmox.token_secret_file,
       verifySsl: raw.proxmox.verify_ssl ?? false,
       pveNode: raw.proxmox.pve_node || 'pve',
+    };
+  }
+
+  // Parser la config Webhook si présente
+  if (raw.webhook) {
+    config.webhook = {
+      fenceUrl: raw.webhook.fence_url,
+      unfenceUrl: raw.webhook.unfence_url,
+      statusUrl: raw.webhook.status_url,
+      method: raw.webhook.method || 'POST',
+      headers: raw.webhook.headers || {},
+      bodyTemplate: raw.webhook.body_template,
+      timeout: raw.webhook.timeout || 30,
+      verifySsl: raw.webhook.verify_ssl ?? true,
     };
   }
 
@@ -233,6 +264,22 @@ function normalizeService(raw: any): ServiceConfig {
   }
 
   return service;
+}
+
+/**
+ * Normalise un health check standalone (snake_case -> camelCase)
+ */
+function normalizeStandaloneHealthCheck(raw: any): StandaloneHealthCheck {
+  return {
+    name: raw.name,
+    type: raw.type || 'tcp',
+    target: raw.target,
+    // Support interval en secondes (snake_case) ou intervalMs
+    intervalMs: raw.interval_ms || (raw.interval ? raw.interval * 1000 : 10000),
+    timeoutMs: raw.timeout_ms || (raw.timeout ? raw.timeout * 1000 : 5000),
+    failuresBeforeUnhealthy: raw.failures_before_unhealthy || 3,
+    successesBeforeHealthy: raw.successes_before_healthy || 2,
+  };
 }
 
 function normalizeConstraint(raw: any): Constraint {
@@ -349,6 +396,24 @@ constraints:
     first: vip-main
     then: nginx
 
+# Health checks standalone (pas liés à un service)
+# Utile pour surveiller des dépendances externes
+health_checks:
+  - name: ssh
+    type: tcp
+    target: 127.0.0.1:22
+    interval: 10        # secondes
+    timeout: 5          # secondes
+    failures_before_unhealthy: 3
+    successes_before_healthy: 2
+  
+  # Exemple HTTP
+  # - name: api-backend
+  #   type: http
+  #   target: "http://192.168.1.10:8080/health"
+  #   interval: 15
+  #   timeout: 3
+
 # STONITH - Shoot The Other Node In The Head
 # Permet d'éteindre un nœud défaillant pour éviter le split-brain
 stonith:
@@ -368,7 +433,21 @@ stonith:
     # Nom du nœud Proxmox (pas le guest)
     pve_node: pve
   
-  # Mapping nœud sfha -> VM/CT Proxmox
+  # Alternative: Provider Webhook pour API externe
+  # Décommentez et adaptez si vous utilisez webhook au lieu de proxmox
+  # webhook:
+  #   fence_url: https://api.example.com/fence
+  #   unfence_url: https://api.example.com/unfence
+  #   status_url: https://api.example.com/status/{{node}}  # optionnel
+  #   method: POST
+  #   headers:
+  #     Authorization: Bearer your-token-here
+  #     Content-Type: application/json
+  #   body_template: '{"node": "{{node}}", "action": "{{action}}"}'
+  #   timeout: 30
+  #   verify_ssl: true
+  
+  # Mapping nœud sfha -> VM/CT Proxmox (requis pour proxmox, optionnel pour webhook)
   nodes:
     ns1:
       type: lxc  # ou qemu

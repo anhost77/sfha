@@ -64,6 +64,18 @@ sfha --version
 # Initialiser avec mesh WireGuard intégré
 sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24
 
+# Avec STONITH Proxmox (optionnel)
+sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24 \
+  --stonith proxmox \
+  --proxmox-url https://192.168.1.100:8006 \
+  --proxmox-token root@pam!sfha \
+  --proxmox-secret-file /etc/sfha/proxmox.secret \
+  --pve-node pve01 \
+  --vmid 101
+
+# Ou configuration interactive
+sudo sfha stonith setup
+
 # Copier le token affiché pour les autres nœuds
 ```
 
@@ -145,7 +157,9 @@ sfha mesh token          # Générer un nouveau token
 
 # STONITH
 sfha stonith status      # État du fencing
+sfha stonith setup       # Configuration interactive
 sfha stonith fence node2 # Fence manuel
+sfha stonith unfence node2 # Rallumer un nœud
 sfha stonith history     # Historique
 
 # Configuration
@@ -257,6 +271,58 @@ logging:
 | **Health checks** | Via agents | VRRP scripts | **HTTP/TCP/systemd** |
 | **Courbe d'apprentissage** | Très raide | Moyenne | **Douce** |
 | **Cas d'usage idéal** | Clusters complexes | VIP simple | **Clusters simples** |
+
+---
+
+## 🔌 STONITH Webhook (API externe)
+
+Pour intégrer avec des APIs externes (cloud, custom, etc.) :
+
+```yaml
+stonith:
+  enabled: true
+  provider: webhook
+  webhook:
+    fence_url: https://api.example.com/servers/{{node}}/stop
+    unfence_url: https://api.example.com/servers/{{node}}/start
+    status_url: https://api.example.com/servers/{{node}}/status
+    method: POST
+    headers:
+      Authorization: Bearer your-token
+      Content-Type: application/json
+    body_template: '{"node": "{{node}}", "action": "{{action}}"}'
+    timeout: 30
+    verify_ssl: true
+```
+
+Les variables `{{node}}` et `{{action}}` sont remplacées automatiquement.
+
+---
+
+## 💓 Health Checks Standalone
+
+Vérifier des services indépendamment des resources :
+
+```yaml
+health_checks:
+  - name: ssh
+    type: tcp
+    target: 127.0.0.1:22
+    interval: 10        # secondes
+    timeout: 5
+    failures_before_unhealthy: 3
+    successes_before_healthy: 2
+    
+  - name: api
+    type: http
+    target: http://localhost:8080/health
+    interval: 15
+    timeout: 3
+```
+
+Vérifier : `sfha health`
+
+---
 
 ### sfha est fait pour vous si...
 

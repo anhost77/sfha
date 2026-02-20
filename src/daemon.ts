@@ -57,7 +57,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.0';
+const VERSION = '1.0.2';
 
 // ============================================
 // Daemon
@@ -131,10 +131,14 @@ export class SfhaDaemon extends EventEmitter {
       // Pour l'instant, on ne supporte que le rechargement simple
       this.config = newConfig;
       
-      // Recréer le health manager avec les nouveaux services
+      // Recréer le health manager avec les nouveaux services et health checks
       if (this.healthManager) {
         this.healthManager.stop();
-        this.healthManager = new HealthManager(this.config.services, this.log);
+        this.healthManager = new HealthManager(
+          this.config.services,
+          this.log,
+          this.config.healthChecks
+        );
         this.healthManager.onHealthChange((name, healthy, result) => {
           this.handleHealthChange(name, healthy, result);
         });
@@ -191,7 +195,11 @@ export class SfhaDaemon extends EventEmitter {
     
     // Initialiser les managers
     this.electionManager = new ElectionManager(this.log);
-    this.healthManager = new HealthManager(this.config!.services, this.log);
+    this.healthManager = new HealthManager(
+      this.config!.services,
+      this.log,
+      this.config!.healthChecks
+    );
     this.resourceManager = new ResourceManager(
       this.config!.services,
       this.config!.constraints,

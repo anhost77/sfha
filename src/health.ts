@@ -5,7 +5,7 @@
 
 import { execSync } from 'child_process';
 import { createConnection, Socket } from 'net';
-import { HealthCheckConfig, ServiceConfig } from './config.js';
+import { HealthCheckConfig, ServiceConfig, StandaloneHealthCheck } from './config.js';
 import { t } from './i18n.js';
 
 // ============================================
@@ -140,20 +140,39 @@ type HealthCallback = (name: string, healthy: boolean, result: HealthResult) => 
  */
 export class HealthManager {
   private services: ServiceConfig[];
+  private standaloneChecks: StandaloneHealthCheck[];
   private state: HealthState;
   private intervals: Map<string, NodeJS.Timeout> = new Map();
   private callbacks: HealthCallback[] = [];
   private log: (msg: string) => void;
 
-  constructor(services: ServiceConfig[], log: (msg: string) => void = console.log) {
+  constructor(
+    services: ServiceConfig[],
+    log: (msg: string) => void = console.log,
+    standaloneChecks: StandaloneHealthCheck[] = []
+  ) {
     this.services = services;
+    this.standaloneChecks = standaloneChecks;
     this.state = { results: new Map() };
     this.log = log;
     
-    // Initialiser l'état
+    // Initialiser l'état pour les services avec healthcheck
     for (const service of services) {
-      this.state.results.set(service.name, {
-        name: service.name,
+      if (service.healthcheck) {
+        this.state.results.set(service.name, {
+          name: service.name,
+          healthy: true, // Présumé sain au démarrage
+          lastCheck: new Date(),
+          consecutiveFailures: 0,
+          consecutiveSuccesses: 0,
+        });
+      }
+    }
+    
+    // Initialiser l'état pour les health checks standalone
+    for (const check of standaloneChecks) {
+      this.state.results.set(check.name, {
+        name: check.name,
         healthy: true, // Présumé sain au démarrage
         lastCheck: new Date(),
         consecutiveFailures: 0,
@@ -173,6 +192,7 @@ export class HealthManager {
    * Démarre tous les health checks
    */
   start(): void {
+    // Health checks liés aux services
     for (const service of this.services) {
       if (!service.healthcheck) continue;
       
@@ -187,6 +207,19 @@ export class HealthManager {
         config.intervalMs
       );
       this.intervals.set(service.name, interval);
+    }
+    
+    // Health checks standalone
+    for (const check of this.standaloneChecks) {
+      // Premier check immédiat
+      this.checkStandalone(check);
+      
+      // Checks périodiques
+      const interval = setInterval(
+        () => this.checkStandalone(check),
+        check.intervalMs
+      );
+      this.intervals.set(check.name, interval);
     }
   }
 
@@ -236,6 +269,53 @@ export class HealthManager {
         result.healthy = false;
         this.log(t('health.failed', { resource: service.name, error: check.error || 'inconnu' }));
         this.notifyCallbacks(service.name, false, result);
+      }
+    }
+  }
+
+  /**
+   * Vérifie un health check standalone
+   */
+  private async checkStandalone(check: StandaloneHealthCheck): Promise<void> {
+    const result = this.state.results.get(check.name)!;
+    
+    this.log(t('health.checking', { resource: check.name }));
+    
+    // Construire un HealthCheckConfig compatible pour runHealthCheck
+    const healthCheckConfig: HealthCheckConfig = {
+      type: check.type,
+      target: check.target,
+      intervalMs: check.intervalMs,
+      timeoutMs: check.timeoutMs,
+      failuresBeforeUnhealthy: check.failuresBeforeUnhealthy,
+      successesBeforeHealthy: check.successesBeforeHealthy,
+    };
+    
+    const checkResult = await runHealthCheck(healthCheckConfig);
+    
+    result.lastCheck = new Date();
+    
+    if (checkResult.ok) {
+      result.consecutiveFailures = 0;
+      result.consecutiveSuccesses++;
+      result.lastError = undefined;
+      
+      // Passer à sain après N succès consécutifs
+      if (!result.healthy && result.consecutiveSuccesses >= check.successesBeforeHealthy) {
+        result.healthy = true;
+        this.log(t('health.passed', { resource: check.name }));
+        this.notifyCallbacks(check.name, true, result);
+      }
+    } else {
+      result.consecutiveSuccesses = 0;
+      result.consecutiveFailures++;
+      result.lastError = checkResult.error;
+      
+      // Passer à défaillant après N échecs consécutifs
+      if (result.healthy && result.consecutiveFailures >= check.failuresBeforeUnhealthy) {
+        result.healthy = false;
+        this.log(t('health.failed', { resource: check.name, error: checkResult.error || 'inconnu' }));
+        this.notifyCallbacks(check.name, false, result);
       }
     }
   }

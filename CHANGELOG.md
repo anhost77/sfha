@@ -5,6 +5,69 @@ Toutes les modifications notables de ce projet seront documentées dans ce fichi
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Versionnement Sémantique](https://semver.org/lang/fr/).
 
+## [1.0.3] - 2026-02-20
+
+### Ajouté
+
+- **Health checks standalone** : section `health_checks:` au niveau racine de la config
+- **Setup STONITH interactif** : `sfha stonith setup [proxmox|webhook]`
+- **Flags STONITH dans init** : `sfha init --stonith proxmox --proxmox-url ...`
+- **Driver STONITH Webhook** : fencing via API HTTP externe
+- **Auto-détection VMID** : détection automatique pour LXC/QEMU Proxmox
+
+### Format health checks standalone
+```yaml
+health_checks:
+  - name: ssh
+    type: tcp
+    target: 127.0.0.1:22
+    interval: 10
+    timeout: 5
+```
+
+### Format STONITH Webhook
+```yaml
+stonith:
+  provider: webhook
+  webhook:
+    fence_url: https://api.example.com/fence/{{node}}
+    unfence_url: https://api.example.com/unfence/{{node}}
+    method: POST
+    headers:
+      Authorization: Bearer xxx
+    body_template: '{"node": "{{node}}", "action": "{{action}}"}'
+    timeout: 30
+```
+
+---
+
+## [1.0.2] - 2026-02-20
+
+### Modifié
+
+- **Failover optimisé** : ~6s au lieu de ~30s
+  - Grace period: 30s → 10s
+  - Polls requis: 3 → 2
+  - Intervalle polling: 5s → 2s
+
+### Corrigé
+
+- Fix double affichage /24 dans `normalizeVip()`
+- Fix vérification VIP après `ip addr add`
+
+---
+
+## [1.0.1] - 2026-02-20
+
+### Corrigé
+
+- **VIP cleanup** : suppression correcte de la VIP au shutdown
+- **Quorum check** : vérification avant activation des ressources
+- **Follower watchdog** : détection correcte de la perte du leader
+- **Service systemd LXC** : désactivation des restrictions namespace
+
+---
+
 ## [1.0.0] - 2026-02-20
 
 ### Ajouté
@@ -42,6 +105,8 @@ et ce projet adhère au [Versionnement Sémantique](https://semver.org/lang/fr/)
 ### Prévu
 
 - Driver STONITH IPMI/iLO
+- Driver STONITH VMware vSphere
+- Driver STONITH AWS EC2
 - Interface web de monitoring
 - Métriques Prometheus
 - Support multi-VIP sur même interface

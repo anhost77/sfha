@@ -10,6 +10,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { StonithDriver } from './drivers/base.js';
 import { ProxmoxStonithDriver } from './drivers/proxmox.js';
+import { WebhookStonithDriver } from './drivers/webhook.js';
 import {
   StonithConfig,
   NodeStonithConfig,
@@ -24,6 +25,7 @@ import {
 export * from './types.js';
 export type { StonithDriver } from './drivers/base.js';
 export { ProxmoxStonithDriver } from './drivers/proxmox.js';
+export { WebhookStonithDriver } from './drivers/webhook.js';
 
 // ============================================
 // Constants
@@ -84,6 +86,12 @@ export class FenceCoordinator {
             throw new Error('Configuration Proxmox manquante');
           }
           this.driver = new ProxmoxStonithDriver(this.config.proxmox, this.log);
+          break;
+        case 'webhook':
+          if (!this.config.webhook) {
+            throw new Error('Configuration Webhook manquante');
+          }
+          this.driver = new WebhookStonithDriver(this.config.webhook, this.log);
           break;
         default:
           throw new Error(`Provider STONITH inconnu: ${this.config.provider}`);
