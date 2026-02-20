@@ -240,13 +240,13 @@ export class SfhaDaemon extends EventEmitter {
     this.checkElection();
     
     // Grace period de démarrage - ne pas essayer de prendre le leadership
-    // si on voit que la VIP est absente pendant les premières 30 secondes
+    // si on voit que la VIP est absente pendant les premières 10 secondes
     // (le leader légitime a besoin de temps pour s'activer)
     this.startupGracePeriod = true;
     setTimeout(() => {
       this.startupGracePeriod = false;
       logger.info('Période de grâce de démarrage terminée');
-    }, 30000);
+    }, 10000);
   }
 
   /**
@@ -671,13 +671,13 @@ export class SfhaDaemon extends EventEmitter {
         // Incrémenter le compteur de polls sans VIP
         this.pollsWithoutVip = (this.pollsWithoutVip || 0) + 1;
         
-        // Après 3 polls sans VIP (15s par défaut), forcer la prise de leadership
-        if (this.pollsWithoutVip >= 3) {
-          logger.warn('VIP absente depuis 3 polls - tentative de prise de leadership');
+        // Après 2 polls sans VIP, forcer la prise de leadership (failover rapide)
+        if (this.pollsWithoutVip >= 2) {
+          logger.warn('VIP absente depuis 2 polls - tentative de prise de leadership');
           this.becomeLeader(); // becomeLeader() vérifie maintenant le quorum et l'éligibilité
           this.pollsWithoutVip = 0;
         } else {
-          logger.warn(`Aucune VIP active détectée (${this.pollsWithoutVip}/3)...`);
+          logger.warn(`Aucune VIP active détectée (${this.pollsWithoutVip}/2)...`);
         }
       } else {
         this.pollsWithoutVip = 0;

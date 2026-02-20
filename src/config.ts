@@ -86,7 +86,7 @@ const defaultConfig: Partial<SfhaConfig> = {
     name: 'sfha-cluster',
     quorumRequired: true,
     failoverDelayMs: 3000,
-    pollIntervalMs: 5000,
+    pollIntervalMs: 2000,
   },
   node: {
     name: '',
@@ -310,7 +310,7 @@ cluster:
   name: mon-cluster
   quorum_required: true
   failover_delay_ms: 3000
-  poll_interval_ms: 5000
+  poll_interval_ms: 2000
 
 # Identité de ce nœud (doit correspondre à Corosync)
 node:
