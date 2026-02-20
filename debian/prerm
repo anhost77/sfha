@@ -1,0 +1,14 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        # Arrêter le service si actif
+        if systemctl is-active --quiet sfha; then
+            echo "Arrêt du service sfha..."
+            systemctl stop sfha || true
+        fi
+        ;;
+esac
+
+exit 0

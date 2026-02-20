@@ -1,0 +1,33 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        # Créer le répertoire de config si absent
+        mkdir -p /etc/sfha
+        
+        # Copier l'exemple si pas de config
+        if [ ! -f /etc/sfha/config.yml ]; then
+            if [ -f /etc/sfha/config.yml.example ]; then
+                cp /etc/sfha/config.yml.example /etc/sfha/config.yml
+            fi
+            echo "Configuration créée: /etc/sfha/config.yml"
+            echo "Veuillez l'éditer avant de démarrer le service."
+        fi
+        
+        # Recharger systemd
+        systemctl daemon-reload || true
+        
+        echo ""
+        echo "╭────────────────────────────────────────╮"
+        echo "│  sfha installé avec succès !           │"
+        echo "├────────────────────────────────────────┤"
+        echo "│  1. Éditer /etc/sfha/config.yml        │"
+        echo "│  2. systemctl start sfha               │"
+        echo "│  3. sfha status                        │"
+        echo "╰────────────────────────────────────────╯"
+        echo ""
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,24 @@
+Package: sfha
+Version: 1.0.0
+Section: admin
+Priority: optional
+Architecture: amd64
+Depends: corosync (>= 3.0), iputils-arping | arping, iproute2
+Recommends: corosync-qdevice, wireguard-tools
+Maintainer: ServerFlow <contact@serverflow.io>
+Description: Système de haute disponibilité léger pour Linux
+ sfha est un gestionnaire de ressources HA minimal qui fonctionne avec
+ Corosync pour le quorum et le membership. Il remplace Pacemaker par
+ un démon léger pour la gestion des VIP, les health checks
+ et le failover automatique.
+ .
+ Caractéristiques:
+  - Zéro I/O disque (état en mémoire)
+  - Configuration YAML simple (/etc/sfha/config.yml)
+  - Health checks HTTP/TCP/systemd
+  - VIP flottante avec gratuitous ARP
+  - Élection de leader automatique
+  - CLI: sfha status, sfha status --json
+ .
+ Langue par défaut: Français (--lang=en disponible)
+Homepage: https://github.com/serverflow/sfha

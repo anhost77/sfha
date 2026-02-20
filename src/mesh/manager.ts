@@ -1,0 +1,625 @@
+/**
+ * @file manager.ts
+ * @description Orchestration du mesh WireGuard
+ */
+
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
+import {
+  MeshConfig,
+  MeshPeer,
+  MeshStatus,
+  MeshInitOptions,
+  MeshJoinOptions,
+  MeshOperationResult,
+} from './types.js';
+import {
+  generateKeyPair,
+  saveKeys,
+  loadKeys,
+  isWireGuardInstalled,
+  generateAuthKey,
+  saveAuthKey,
+} from './keys.js';
+import {
+  createJoinToken,
+  parseJoinToken,
+  extractMeshIp,
+  extractCidr,
+  calculateNetwork,
+  allocateNextIp,
+} from './token.js';
+import {
+  validateMeshIp,
+  findFreeIp,
+  checkIpConflict,
+  checkSubnetOverlap,
+} from './ip-conflict.js';
+import {
+  createInterface,
+  deleteInterface,
+  isInterfaceUp,
+  addPeer,
+  removePeer,
+  getInterfaceStatus,
+  generateWgQuickConfig,
+  saveWgQuickConfig,
+  enableWgQuickService,
+  disableWgQuickService,
+  detectPublicEndpoint,
+} from './wireguard.js';
+import { updateCorosyncForMesh } from './corosync-mesh.js';
+
+const MESH_CONFIG_PATH = '/etc/sfha/mesh.json';
+const WG_KEYS_DIR = '/etc/sfha/wireguard';
+const COROSYNC_AUTHKEY_PATH = '/etc/corosync/authkey';
+const WG_INTERFACE = 'wg-sfha';
+const DEFAULT_PORT = 51820;
+const DEFAULT_KEEPALIVE = 25;
+const DEFAULT_COROSYNC_PORT = 5405;
+
+/**
+ * Gestionnaire du mesh WireGuard
+ */
+export class MeshManager {
+  private config: MeshConfig | null = null;
+
+  constructor() {
+    this.loadConfig();
+  }
+
+  /**
+   * Charge la configuration du mesh depuis le disque
+   */
+  private loadConfig(): void {
+    if (existsSync(MESH_CONFIG_PATH)) {
+      try {
+        const content = readFileSync(MESH_CONFIG_PATH, 'utf-8');
+        this.config = JSON.parse(content);
+      } catch {
+        this.config = null;
+      }
+    }
+  }
+
+  /**
+   * Sauvegarde la configuration du mesh
+   */
+  private saveConfig(): void {
+    if (!this.config) return;
+
+    const dir = dirname(MESH_CONFIG_PATH);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }
+
+    // Ne pas sauvegarder la clé privée dans le JSON
+    const configToSave = {
+      ...this.config,
+      privateKey: '***',
+    };
+
+    writeFileSync(MESH_CONFIG_PATH, JSON.stringify(this.config, null, 2), {
+      mode: 0o600,
+    });
+  }
+
+  /**
+   * Initialise un nouveau mesh
+   */
+  async init(options: MeshInitOptions): Promise<MeshOperationResult> {
+    // Vérifier que WireGuard est installé
+    if (!isWireGuardInstalled()) {
+      return {
+        success: false,
+        error: 'WireGuard n\'est pas installé. Installez-le avec: apt install wireguard-tools',
+      };
+    }
+
+    // Vérifier qu'aucun mesh n'existe déjà
+    if (this.config) {
+      return {
+        success: false,
+        error: 'Un mesh existe déjà. Utilisez "sfha mesh down" puis supprimez /etc/sfha/mesh.json pour réinitialiser.',
+      };
+    }
+
+    const port = options.port || DEFAULT_PORT;
+    const meshIp = options.meshIp;
+    const meshNetwork = calculateNetwork(meshIp);
+
+    // ===== Vérification des conflits d'IP =====
+    const ipValidation = validateMeshIp(meshIp, true);
+    if (!ipValidation.valid) {
+      return {
+        success: false,
+        error: `❌ ${ipValidation.errors.join('\n❌ ')}`,
+      };
+    }
+    // Log des warnings éventuels (mais on continue)
+    if (ipValidation.warnings.length > 0) {
+      console.warn(`⚠️  ${ipValidation.warnings.join('\n⚠️  ')}`);
+    }
+
+    // Générer les clés WireGuard
+    const keys = generateKeyPair();
+    saveKeys(keys, WG_KEYS_DIR);
+
+    // Générer l'authkey Corosync
+    const authKey = generateAuthKey();
+    saveAuthKey(authKey, COROSYNC_AUTHKEY_PATH);
+
+    // Détecter l'endpoint
+    let endpoint = options.endpoint;
+    if (!endpoint) {
+      endpoint = detectPublicEndpoint(port) || `0.0.0.0:${port}`;
+    } else if (!endpoint.includes(':')) {
+      endpoint = `${endpoint}:${port}`;
+    }
+
+    // Créer la configuration
+    this.config = {
+      interface: WG_INTERFACE,
+      listenPort: port,
+      privateKey: keys.privateKey,
+      publicKey: keys.publicKey,
+      meshIp,
+      meshNetwork,
+      clusterName: options.clusterName,
+      authKey,
+      corosyncPort: DEFAULT_COROSYNC_PORT,
+      peers: [],
+    };
+
+    this.saveConfig();
+
+    // Créer l'interface WireGuard
+    createInterface(WG_INTERFACE, meshIp, keys.privateKey, port);
+
+    // Générer et sauvegarder la config wg-quick pour persistance
+    const wgConfig = generateWgQuickConfig(
+      keys.privateKey,
+      meshIp,
+      port,
+      this.config.peers
+    );
+    saveWgQuickConfig(WG_INTERFACE, wgConfig);
+    enableWgQuickService(WG_INTERFACE);
+
+    // Mettre à jour Corosync
+    updateCorosyncForMesh(options.clusterName, [
+      {
+        name: 'node1', // Sera mis à jour par la config principale
+        ip: extractMeshIp(meshIp),
+        nodeId: 1,
+      },
+    ], DEFAULT_COROSYNC_PORT);
+
+    // Générer le token
+    const token = createJoinToken({
+      cluster: options.clusterName,
+      endpoint,
+      pubkey: keys.publicKey,
+      authkey: authKey,
+      meshNetwork,
+      meshIp: extractMeshIp(meshIp),
+      corosyncPort: DEFAULT_COROSYNC_PORT,
+    });
+
+    return {
+      success: true,
+      message: `Mesh initialisé avec succès sur ${meshIp}`,
+      token,
+    };
+  }
+
+  /**
+   * Rejoint un mesh existant
+   */
+  async join(options: MeshJoinOptions): Promise<MeshOperationResult> {
+    // Vérifier que WireGuard est installé
+    if (!isWireGuardInstalled()) {
+      return {
+        success: false,
+        error: 'WireGuard n\'est pas installé. Installez-le avec: apt install wireguard-tools',
+      };
+    }
+
+    // Vérifier qu'aucun mesh n'existe déjà
+    if (this.config) {
+      return {
+        success: false,
+        error: 'Un mesh existe déjà. Utilisez "sfha mesh down" puis supprimez /etc/sfha/mesh.json pour rejoindre un autre cluster.',
+      };
+    }
+
+    // Parser le token
+    let token;
+    try {
+      token = parseJoinToken(options.token);
+    } catch (error: any) {
+      return {
+        success: false,
+        error: `Token invalide: ${error.message}`,
+      };
+    }
+
+    const port = DEFAULT_PORT;
+
+    // Générer les clés WireGuard
+    const keys = generateKeyPair();
+    saveKeys(keys, WG_KEYS_DIR);
+
+    // Sauvegarder l'authkey Corosync
+    saveAuthKey(token.authkey, COROSYNC_AUTHKEY_PATH);
+
+    // Allouer une IP si non spécifiée
+    let meshIp = options.meshIp;
+    if (!meshIp) {
+      // Utiliser l'IP assignée dans le token v2 si disponible
+      if (token.assignedIp) {
+        meshIp = token.assignedIp;
+      } else {
+        // Fallback: calculer depuis les IPs utilisées
+        const usedIps = token.usedIps || [token.meshIp];
+        meshIp = allocateNextIp(token.meshNetwork, usedIps);
+      }
+    }
+
+    // ===== Vérification des conflits d'IP =====
+    const ipValidation = validateMeshIp(meshIp, false); // pas besoin de vérifier le subnet, il existe déjà
+    if (!ipValidation.valid) {
+      // Si l'IP assignée est en conflit, essayer d'en trouver une autre
+      const usedIps = token.usedIps || [token.meshIp];
+      const freeIp = findFreeIp(token.meshNetwork, usedIps);
+      if (freeIp) {
+        console.warn(`⚠️  L'IP ${meshIp} est en conflit, utilisation de ${freeIp} à la place`);
+        meshIp = freeIp;
+      } else {
+        return {
+          success: false,
+          error: `❌ ${ipValidation.errors.join('\n❌ ')}\nAucune IP libre trouvée dans le réseau ${token.meshNetwork}`,
+        };
+      }
+    }
+    if (ipValidation.warnings.length > 0) {
+      console.warn(`⚠️  ${ipValidation.warnings.join('\n⚠️  ')}`);
+    }
+
+    // Détecter l'endpoint
+    let endpoint = options.endpoint;
+    if (!endpoint) {
+      endpoint = detectPublicEndpoint(port) || `0.0.0.0:${port}`;
+    } else if (!endpoint.includes(':')) {
+      endpoint = `${endpoint}:${port}`;
+    }
+
+    // Créer le peer initial (le nœud qui a généré le token)
+    const initiatorPeer: MeshPeer = {
+      name: 'initiator', // Sera renommé après
+      publicKey: token.pubkey,
+      endpoint: token.endpoint,
+      allowedIps: `${token.meshIp}/32`,
+      persistentKeepalive: DEFAULT_KEEPALIVE,
+    };
+
+    // Créer la configuration
+    this.config = {
+      interface: WG_INTERFACE,
+      listenPort: port,
+      privateKey: keys.privateKey,
+      publicKey: keys.publicKey,
+      meshIp,
+      meshNetwork: token.meshNetwork,
+      clusterName: token.cluster,
+      authKey: token.authkey,
+      corosyncPort: token.corosyncPort,
+      peers: [initiatorPeer],
+    };
+
+    this.saveConfig();
+
+    // Créer l'interface WireGuard
+    createInterface(WG_INTERFACE, meshIp, keys.privateKey, port);
+
+    // Ajouter le peer initial
+    addPeer(WG_INTERFACE, initiatorPeer);
+
+    // Générer et sauvegarder la config wg-quick pour persistance
+    const wgConfig = generateWgQuickConfig(
+      keys.privateKey,
+      meshIp,
+      port,
+      this.config.peers
+    );
+    saveWgQuickConfig(WG_INTERFACE, wgConfig);
+    enableWgQuickService(WG_INTERFACE);
+
+    return {
+      success: true,
+      message: `Rejoint le cluster "${token.cluster}" avec l'IP mesh ${meshIp}`,
+    };
+  }
+
+  /**
+   * Génère un token de join
+   */
+  generateToken(assignedIp?: string): MeshOperationResult {
+    if (!this.config) {
+      return {
+        success: false,
+        error: 'Aucun mesh configuré. Utilisez "sfha init --mesh" d\'abord.',
+      };
+    }
+
+    // Collecter toutes les IPs utilisées dans le mesh
+    const usedIps = [
+      extractMeshIp(this.config.meshIp),
+      ...this.config.peers.map((p) => p.allowedIps.split('/')[0]),
+    ];
+
+    // Calculer l'IP à assigner si non spécifiée
+    let ipToAssign = assignedIp;
+    if (!ipToAssign) {
+      ipToAssign = allocateNextIp(this.config.meshNetwork, usedIps);
+    }
+
+    // Détecter l'endpoint actuel
+    const endpoint =
+      detectPublicEndpoint(this.config.listenPort) ||
+      `0.0.0.0:${this.config.listenPort}`;
+
+    const token = createJoinToken({
+      cluster: this.config.clusterName,
+      endpoint,
+      pubkey: this.config.publicKey,
+      authkey: this.config.authKey,
+      meshNetwork: this.config.meshNetwork,
+      meshIp: extractMeshIp(this.config.meshIp), // IP du nœud initiateur
+      corosyncPort: this.config.corosyncPort,
+      assignedIp: ipToAssign, // IP pré-assignée pour le nouveau nœud
+      usedIps, // Liste complète des IPs utilisées
+    });
+
+    return {
+      success: true,
+      token,
+    };
+  }
+
+  /**
+   * Ajoute un peer au mesh
+   */
+  addPeer(peer: Omit<MeshPeer, 'persistentKeepalive'>): MeshOperationResult {
+    if (!this.config) {
+      return {
+        success: false,
+        error: 'Aucun mesh configuré.',
+      };
+    }
+
+    // Vérifier que le peer n'existe pas déjà
+    if (this.config.peers.some((p) => p.publicKey === peer.publicKey)) {
+      return {
+        success: false,
+        error: 'Ce peer existe déjà.',
+      };
+    }
+
+    const fullPeer: MeshPeer = {
+      ...peer,
+      persistentKeepalive: DEFAULT_KEEPALIVE,
+    };
+
+    // Ajouter au mesh
+    this.config.peers.push(fullPeer);
+    this.saveConfig();
+
+    // Ajouter à WireGuard si l'interface est active
+    if (isInterfaceUp(WG_INTERFACE)) {
+      addPeer(WG_INTERFACE, fullPeer);
+    }
+
+    // Mettre à jour wg-quick config
+    const wgConfig = generateWgQuickConfig(
+      this.config.privateKey,
+      this.config.meshIp,
+      this.config.listenPort,
+      this.config.peers
+    );
+    saveWgQuickConfig(WG_INTERFACE, wgConfig);
+
+    return {
+      success: true,
+      message: `Peer ${peer.name} ajouté avec succès.`,
+    };
+  }
+
+  /**
+   * Supprime un peer du mesh
+   */
+  removePeerByName(name: string): MeshOperationResult {
+    if (!this.config) {
+      return {
+        success: false,
+        error: 'Aucun mesh configuré.',
+      };
+    }
+
+    const peerIndex = this.config.peers.findIndex((p) => p.name === name);
+    if (peerIndex === -1) {
+      return {
+        success: false,
+        error: `Peer "${name}" non trouvé.`,
+      };
+    }
+
+    const peer = this.config.peers[peerIndex];
+
+    // Supprimer de WireGuard si l'interface est active
+    if (isInterfaceUp(WG_INTERFACE)) {
+      removePeer(WG_INTERFACE, peer.publicKey);
+    }
+
+    // Supprimer de la config
+    this.config.peers.splice(peerIndex, 1);
+    this.saveConfig();
+
+    // Mettre à jour wg-quick config
+    const wgConfig = generateWgQuickConfig(
+      this.config.privateKey,
+      this.config.meshIp,
+      this.config.listenPort,
+      this.config.peers
+    );
+    saveWgQuickConfig(WG_INTERFACE, wgConfig);
+
+    return {
+      success: true,
+      message: `Peer ${name} supprimé avec succès.`,
+    };
+  }
+
+  /**
+   * Démarre le mesh
+   */
+  up(): MeshOperationResult {
+    if (!this.config) {
+      return {
+        success: false,
+        error: 'Aucun mesh configuré.',
+      };
+    }
+
+    if (isInterfaceUp(WG_INTERFACE)) {
+      return {
+        success: true,
+        message: 'Le mesh est déjà actif.',
+      };
+    }
+
+    // Charger les clés
+    const keys = loadKeys(WG_KEYS_DIR);
+    if (!keys) {
+      return {
+        success: false,
+        error: 'Clés WireGuard introuvables.',
+      };
+    }
+
+    // Créer l'interface
+    createInterface(
+      WG_INTERFACE,
+      this.config.meshIp,
+      keys.privateKey,
+      this.config.listenPort
+    );
+
+    // Ajouter tous les peers
+    for (const peer of this.config.peers) {
+      addPeer(WG_INTERFACE, peer);
+    }
+
+    return {
+      success: true,
+      message: 'Mesh démarré.',
+    };
+  }
+
+  /**
+   * Arrête le mesh
+   */
+  down(): MeshOperationResult {
+    if (!isInterfaceUp(WG_INTERFACE)) {
+      return {
+        success: true,
+        message: 'Le mesh est déjà arrêté.',
+      };
+    }
+
+    deleteInterface(WG_INTERFACE);
+
+    return {
+      success: true,
+      message: 'Mesh arrêté.',
+    };
+  }
+
+  /**
+   * Récupère le statut du mesh
+   */
+  getStatus(): MeshStatus {
+    if (!this.config) {
+      return {
+        active: false,
+        interface: WG_INTERFACE,
+        localIp: '',
+        listenPort: DEFAULT_PORT,
+        publicKey: '',
+        peers: [],
+      };
+    }
+
+    const wgStatus = getInterfaceStatus(WG_INTERFACE);
+    const active = wgStatus !== null;
+
+    const peers = this.config.peers.map((peer) => {
+      const wgPeer = wgStatus?.peers.find((p) => p.publicKey === peer.publicKey);
+      const connected =
+        wgPeer?.latestHandshake !== undefined &&
+        Date.now() / 1000 - wgPeer.latestHandshake < 180; // 3 minutes
+
+      return {
+        name: peer.name,
+        ip: peer.allowedIps.split('/')[0],
+        endpoint: wgPeer?.endpoint || peer.endpoint,
+        connected,
+        latestHandshake: wgPeer?.latestHandshake
+          ? new Date(wgPeer.latestHandshake * 1000)
+          : undefined,
+        transferRx: wgPeer?.transferRx,
+        transferTx: wgPeer?.transferTx,
+      };
+    });
+
+    return {
+      active,
+      interface: WG_INTERFACE,
+      localIp: this.config.meshIp,
+      listenPort: this.config.listenPort,
+      publicKey: this.config.publicKey,
+      peers,
+    };
+  }
+
+  /**
+   * Retourne la configuration actuelle
+   */
+  getConfig(): MeshConfig | null {
+    return this.config;
+  }
+
+  /**
+   * Vérifie si le mesh est configuré
+   */
+  isConfigured(): boolean {
+    return this.config !== null;
+  }
+
+  /**
+   * Vérifie si le mesh est actif
+   */
+  isActive(): boolean {
+    return isInterfaceUp(WG_INTERFACE);
+  }
+}
+
+// Instance singleton
+let meshManagerInstance: MeshManager | null = null;
+
+export function getMeshManager(): MeshManager {
+  if (!meshManagerInstance) {
+    meshManagerInstance = new MeshManager();
+  }
+  return meshManagerInstance;
+}

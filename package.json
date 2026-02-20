@@ -1,0 +1,60 @@
+{
+  "name": "sfha",
+  "version": "1.0.0",
+  "description": "Haute Disponibilité légère pour Linux - Lightweight High Availability",
+  "type": "module",
+  "private": true,
+  "bin": "dist/cli.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/serverflow/sfha.git"
+  },
+  "homepage": "https://github.com/serverflow/sfha#readme",
+  "bugs": {
+    "url": "https://github.com/serverflow/sfha/issues"
+  },
+  "keywords": [
+    "high-availability",
+    "ha",
+    "cluster",
+    "failover",
+    "vip",
+    "corosync",
+    "pacemaker",
+    "stonith",
+    "wireguard",
+    "mesh",
+    "linux",
+    "debian",
+    "ubuntu"
+  ],
+  "pkg": {
+    "targets": ["node20-linux-x64"],
+    "outputPath": "bin",
+    "assets": [
+      "locales/**/*"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "bundle": "esbuild src/cli.ts --bundle --platform=node --target=node18 --outfile=dist/sfha.js --format=esm --external:yaml",
+    "build:standalone": "npm run build && npm run bundle",
+    "dev": "tsx watch src/cli.ts",
+    "test": "vitest",
+    "clean": "rm -rf dist build"
+  },
+  "author": "Adrien / ServerFlow",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.0.0",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@yao-pkg/pkg": "^6.14.1",
+    "esbuild": "^0.20.2",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  }
+}

@@ -1,0 +1,23 @@
+[Unit]
+Description=sfha - Système de Haute Disponibilité léger
+Documentation=https://github.com/serverflow/sfha
+After=network.target corosync.service
+Requires=corosync.service
+ConditionPathExists=/etc/sfha/config.yml
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sfha run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sfha
+
+# Sécurité minimale (besoin de root pour ip addr)
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

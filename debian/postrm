@@ -1,0 +1,16 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge)
+        # Supprimer la configuration
+        rm -rf /etc/sfha
+        echo "Configuration sfha supprimée."
+        ;;
+    remove)
+        # Recharger systemd
+        systemctl daemon-reload || true
+        ;;
+esac
+
+exit 0
