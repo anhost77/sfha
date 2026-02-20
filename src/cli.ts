@@ -14,10 +14,12 @@ import { sendCommand, isDaemonRunning } from './control.js';
 import { initI18n, t } from './i18n.js';
 import { getMeshManager, isWireGuardInstalled } from './mesh/index.js';
 import { isServiceActive } from './resources.js';
+import { logger } from './utils/logger.js';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import * as readline from 'readline';
+import { execSync, spawn } from 'child_process';
 
 // ============================================
 // Version
@@ -727,7 +729,14 @@ program
   .name('sfha')
   .description('Système de haute disponibilité léger')
   .version(getVersion(), '-v, --version', 'Afficher la version')
-  .option('--lang <lang>', 'Langue (fr/en)', 'fr');
+  .option('--lang <lang>', 'Langue (fr/en)', 'fr')
+  .option('--verbose', 'Activer les logs de debug')
+  .hook('preAction', (thisCommand) => {
+    const opts = thisCommand.opts();
+    if (opts.verbose) {
+      logger.setLevel('debug');
+    }
+  });
 
 program
   .command('status')
@@ -1150,6 +1159,95 @@ async function meshRemovePeerCommand(name: string, options: { lang?: string }): 
   }
 
   console.log(colorize('✓', 'green'), result.message);
+}
+
+// ============================================
+// Logs Command
+// ============================================
+
+program
+  .command('logs')
+  .description('Afficher les logs du daemon sfha (via journald)')
+  .option('-f, --follow', 'Suivre les logs en temps réel')
+  .option('-n, --lines <n>', 'Nombre de lignes à afficher', '50')
+  .option('--since <time>', 'Depuis quand (ex: "1h ago", "today")')
+  .option('--until <time>', 'Jusqu\'à quand')
+  .option('-p, --priority <level>', 'Niveau de priorité (debug, info, warning, err)')
+  .option('--no-pager', 'Désactiver le pager')
+  .option('-o, --output <format>', 'Format de sortie (short, verbose, json)', 'short')
+  .action(logsCommand);
+
+async function logsCommand(options: {
+  follow?: boolean;
+  lines?: string;
+  since?: string;
+  until?: string;
+  priority?: string;
+  pager?: boolean;
+  output?: string;
+}): Promise<void> {
+  // Vérifier que journalctl est disponible
+  try {
+    execSync('which journalctl', { stdio: 'ignore' });
+  } catch {
+    console.error(colorize('Erreur:', 'red'), 'journalctl non disponible. Ce système n\'utilise pas systemd.');
+    process.exit(1);
+  }
+
+  // Construire la commande journalctl
+  const args: string[] = ['-u', 'sfha'];
+
+  if (options.follow) {
+    args.push('-f');
+  }
+
+  if (options.lines && !options.follow) {
+    args.push('-n', options.lines);
+  }
+
+  if (options.since) {
+    args.push('--since', options.since);
+  }
+
+  if (options.until) {
+    args.push('--until', options.until);
+  }
+
+  if (options.priority) {
+    // Mapper les niveaux sfha vers syslog
+    const priorityMap: Record<string, string> = {
+      debug: '7',
+      info: '6',
+      warning: '4',
+      warn: '4',
+      error: '3',
+      err: '3',
+    };
+    const prio = priorityMap[options.priority.toLowerCase()] || options.priority;
+    args.push('-p', prio);
+  }
+
+  if (options.pager === false) {
+    args.push('--no-pager');
+  }
+
+  if (options.output) {
+    args.push('-o', options.output);
+  }
+
+  // Exécuter journalctl
+  const proc = spawn('journalctl', args, {
+    stdio: 'inherit',
+  });
+
+  proc.on('error', (err) => {
+    console.error(colorize('Erreur:', 'red'), err.message);
+    process.exit(1);
+  });
+
+  proc.on('exit', (code) => {
+    process.exit(code || 0);
+  });
 }
 
 program.parse();

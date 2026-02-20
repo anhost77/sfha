@@ -13,6 +13,7 @@ import { ElectionManager, ElectionResult, electLeader } from './election.js';
 import { ControlServer, ControlCommand, ControlResponse } from './control.js';
 import { FenceCoordinator, createFenceCoordinator, StonithStatus, FenceHistoryEntry } from './stonith/index.js';
 import { t, initI18n } from './i18n.js';
+import { logger, setLogLevel, createSimpleLogger } from './utils/logger.js';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 
 // ============================================
@@ -84,8 +85,9 @@ export class SfhaDaemon extends EventEmitter {
   // Timers de délai avant fencing (pour annuler si le nœud revient)
   private pendingFenceTimers: Map<string, NodeJS.Timeout> = new Map();
   
+  /** Fonction de log pour compatibilité avec les sous-modules */
   private log: (msg: string) => void;
-  private debug: boolean;
+  private debugMode: boolean;
   private pollsWithoutVip: number = 0;
   private pollsAsSecondary: number = 0;
   private startupGracePeriod: boolean = true;
@@ -93,16 +95,18 @@ export class SfhaDaemon extends EventEmitter {
   constructor(options: DaemonOptions = {}) {
     super();
     this.configPath = options.configPath || '/etc/sfha/config.yml';
-    this.debug = options.debug || false;
+    this.debugMode = options.debug || false;
     
     // Initialiser i18n
     initI18n(options.lang);
     
-    // Logger
-    this.log = (msg: string) => {
-      const timestamp = new Date().toISOString();
-      console.log(`[${timestamp}] ${msg}`);
-    };
+    // Configurer le logger
+    if (this.debugMode) {
+      setLogLevel('debug');
+    }
+    
+    // Créer une fonction de log compatible pour les sous-modules
+    this.log = createSimpleLogger('info');
   }
 
   /**
@@ -110,14 +114,14 @@ export class SfhaDaemon extends EventEmitter {
    */
   loadConfiguration(): void {
     this.config = loadConfig(this.configPath);
-    this.log(`📋 Configuration chargée: ${this.config.cluster.name}`);
+    logger.info(`Configuration chargée: ${this.config.cluster.name}`);
   }
 
   /**
    * Recharge la configuration à chaud
    */
   reload(): void {
-    this.log(t('action.reload'));
+    logger.info(t('action.reload'));
     
     // Recharger la config
     const newConfig = loadConfig(this.configPath);
@@ -149,7 +153,7 @@ export class SfhaDaemon extends EventEmitter {
       this.config = newConfig;
     }
     
-    this.log(t('action.reloaded'));
+    logger.info(t('action.reloaded'));
   }
 
   /**
@@ -158,7 +162,7 @@ export class SfhaDaemon extends EventEmitter {
   async start(): Promise<void> {
     if (this.running) return;
     
-    this.log(t('daemon.starting'));
+    logger.info(t('daemon.starting'));
     
     // Créer le fichier PID
     this.writePidFile();
@@ -204,9 +208,9 @@ export class SfhaDaemon extends EventEmitter {
       if (this.fenceCoordinator) {
         const stonithOk = await this.fenceCoordinator.initialize();
         if (stonithOk) {
-          this.log('🔫 STONITH initialisé et prêt');
+          logger.info('STONITH initialisé et prêt');
         } else {
-          this.log('⚠️ STONITH configuré mais initialisation échouée');
+          logger.warn('STONITH configuré mais initialisation échouée');
         }
       }
     }
@@ -230,7 +234,7 @@ export class SfhaDaemon extends EventEmitter {
     this.corosyncWatcher.start();
     
     this.running = true;
-    this.log(t('daemon.started'));
+    logger.info(t('daemon.started'));
     
     // Première élection
     this.checkElection();
@@ -241,7 +245,7 @@ export class SfhaDaemon extends EventEmitter {
     this.startupGracePeriod = true;
     setTimeout(() => {
       this.startupGracePeriod = false;
-      this.log('✅ Période de grâce de démarrage terminée');
+      logger.info('Période de grâce de démarrage terminée');
     }, 30000);
   }
 
@@ -251,7 +255,7 @@ export class SfhaDaemon extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.running) return;
     
-    this.log(t('daemon.stopping'));
+    logger.info(t('daemon.stopping'));
     
     // Arrêter le serveur de contrôle
     this.controlServer?.stop();
@@ -271,7 +275,7 @@ export class SfhaDaemon extends EventEmitter {
     this.running = false;
     this.isLeader = false;
     
-    this.log(t('daemon.stopped'));
+    logger.info(t('daemon.stopped'));
   }
 
   /**
@@ -445,12 +449,12 @@ export class SfhaDaemon extends EventEmitter {
    * Attend le quorum
    */
   private async waitForQuorum(): Promise<void> {
-    this.log(t('daemon.waitingQuorum'));
+    logger.info(t('daemon.waitingQuorum'));
     
     while (true) {
       const quorum = getQuorumStatus();
       if (quorum.quorate) {
-        this.log(t('daemon.quorumAcquired'));
+        logger.info(t('daemon.quorumAcquired'));
         return;
       }
       
@@ -473,7 +477,7 @@ export class SfhaDaemon extends EventEmitter {
       if (result?.isLocalLeader) {
         // On est le leader élu mais en standby - on refuse le leadership
         this.isLeader = false;
-        this.log('⚠️ Élu leader mais en standby - ressources non activées');
+        logger.warn('Élu leader mais en standby - ressources non activées');
       }
       return;
     }
@@ -493,18 +497,18 @@ export class SfhaDaemon extends EventEmitter {
     // BUG FIX #2: Vérifier le quorum AVANT de devenir leader
     const quorum = getQuorumStatus();
     if (!quorum.quorate) {
-      this.log('⚠️ Pas de quorum - impossible de devenir leader');
+      logger.warn('Pas de quorum - impossible de devenir leader');
       return;
     }
     
     // BUG FIX #3: Vérifier que ce nœud DEVRAIT être leader selon l'élection
     const election = electLeader();
     if (!election?.isLocalLeader) {
-      this.log(`⚠️ Ce nœud n'est pas éligible au leadership (leader élu: ${election?.leaderName || 'aucun'})`);
+      logger.warn(`Ce nœud n'est pas éligible au leadership (leader élu: ${election?.leaderName || 'aucun'})`);
       return;
     }
     
-    this.log('👑 Ce nœud devient leader (prise de relai)');
+    logger.info('Ce nœud devient leader (prise de relai)');
     this.isLeader = true;
     this.activateResources();
     
@@ -526,7 +530,7 @@ export class SfhaDaemon extends EventEmitter {
     // BUG FIX #1: Si on perd le leadership, désactiver les ressources IMMÉDIATEMENT
     // Pas de délai, pas de compteur - la VIP doit être supprimée tout de suite
     if (wasLeader && !isLeader) {
-      this.log(`⚠️ Perte du leadership - désactivation immédiate des ressources`);
+      logger.warn('Perte du leadership - désactivation immédiate des ressources');
       this.pollsAsSecondary = 0;
       this.isLeader = false;
       this.deactivateResources();
@@ -541,7 +545,7 @@ export class SfhaDaemon extends EventEmitter {
       // Devenu leader - vérifier le quorum avant d'activer
       const quorum = getQuorumStatus();
       if (!quorum.quorate && this.config?.cluster.quorumRequired) {
-        this.log('⚠️ Élu leader mais pas de quorum - ressources non activées');
+        logger.warn('Élu leader mais pas de quorum - ressources non activées');
         this.isLeader = false;
         return;
       }
@@ -561,19 +565,19 @@ export class SfhaDaemon extends EventEmitter {
     
     // BUG FIX #3: Double vérification - seul le leader peut activer les VIPs
     if (!this.isLeader) {
-      this.log('⚠️ Tentative d\'activation des ressources sans être leader - ignorée');
+      logger.warn('Tentative d\'activation des ressources sans être leader - ignorée');
       return;
     }
     
     // BUG FIX #2: Vérifier le quorum avant d'activer
     const quorum = getQuorumStatus();
     if (!quorum.quorate && this.config.cluster.quorumRequired) {
-      this.log('⚠️ Tentative d\'activation des ressources sans quorum - ignorée');
+      logger.warn('Tentative d\'activation des ressources sans quorum - ignorée');
       this.isLeader = false;
       return;
     }
     
-    this.log('🚀 Activation des ressources...');
+    logger.info('Activation des ressources...');
     
     // Activer les VIPs
     activateAllVips(this.config.vips, this.log);
@@ -584,7 +588,7 @@ export class SfhaDaemon extends EventEmitter {
     // Démarrer les health checks
     this.healthManager?.start();
     
-    this.log('✅ Ressources activées');
+    logger.info('Ressources activées');
   }
 
   /**
@@ -593,7 +597,7 @@ export class SfhaDaemon extends EventEmitter {
   private deactivateResources(): void {
     if (!this.config) return;
     
-    this.log('🛑 Désactivation des ressources...');
+    logger.info('Désactivation des ressources...');
     
     // Arrêter les health checks
     this.healthManager?.stop();
@@ -604,22 +608,20 @@ export class SfhaDaemon extends EventEmitter {
     // Désactiver les VIPs
     deactivateAllVips(this.config.vips, this.log);
     
-    this.log('✅ Ressources désactivées');
+    logger.info('Ressources désactivées');
   }
 
   /**
    * Gère les polls Corosync
    */
   private handlePoll(state: CorosyncState): void {
-    if (this.debug) {
-      this.log(`🔄 Poll: ${state.nodes.filter(n => n.online).length}/${state.nodes.length} nœuds, quorum=${state.quorum.quorate}`);
-    }
+    logger.debug(`Poll: ${state.nodes.filter(n => n.online).length}/${state.nodes.length} nœuds, quorum=${state.quorum.quorate}`);
     
     // BUG FIX #2: Vérification du quorum à chaque poll
     // Si pas de quorum et qu'on a des ressources actives, les désactiver
     if (!state.quorum.quorate && this.config?.cluster.quorumRequired) {
       if (this.isLeader) {
-        this.log('⚠️ Perte de quorum détectée - désactivation des ressources');
+        logger.warn('Perte de quorum détectée - désactivation des ressources');
         this.isLeader = false;
         this.deactivateResources();
       }
@@ -646,7 +648,7 @@ export class SfhaDaemon extends EventEmitter {
       if (!anyVipActive) {
         // BUG FIX #2: Vérifier le quorum AVANT de considérer la prise de leadership
         if (!state.quorum.quorate) {
-          this.log('⚠️ VIP absente mais pas de quorum - pas de prise de leadership');
+          logger.warn('VIP absente mais pas de quorum - pas de prise de leadership');
           this.pollsWithoutVip = 0;
           this.emit('poll', state);
           return;
@@ -657,11 +659,11 @@ export class SfhaDaemon extends EventEmitter {
         
         // Après 3 polls sans VIP (15s par défaut), forcer la prise de leadership
         if (this.pollsWithoutVip >= 3) {
-          this.log('🚨 VIP absente depuis 3 polls - tentative de prise de leadership');
+          logger.warn('VIP absente depuis 3 polls - tentative de prise de leadership');
           this.becomeLeader(); // becomeLeader() vérifie maintenant le quorum et l'éligibilité
           this.pollsWithoutVip = 0;
         } else {
-          this.log(`⚠️ Aucune VIP active détectée (${this.pollsWithoutVip}/3)...`);
+          logger.warn(`Aucune VIP active détectée (${this.pollsWithoutVip}/3)...`);
         }
       } else {
         this.pollsWithoutVip = 0;
@@ -688,9 +690,9 @@ export class SfhaDaemon extends EventEmitter {
     const activeVips = vipStates.filter(v => v.active);
     
     if (activeVips.length > 0) {
-      this.log('🚨 WATCHDOG: VIP active sur un follower ! Désactivation immédiate...');
+      logger.error('WATCHDOG: VIP active sur un follower ! Désactivation immédiate...');
       for (const vip of activeVips) {
-        this.log(`🚨 Suppression de la VIP ${vip.ip} (ne devrait pas être là)`);
+        logger.error(`Suppression de la VIP ${vip.ip} (ne devrait pas être là)`);
       }
       deactivateAllVips(this.config.vips, this.log);
     }
@@ -724,11 +726,11 @@ export class SfhaDaemon extends EventEmitter {
       // (le fencing event-driven devrait normalement l'avoir fait avant)
       if (pollCount === 2) {
         if (this.shouldFenceNode(node.name)) {
-          this.log(`⚠️ [BACKUP] Nœud ${node.name} offline depuis ${pollCount} polls - programmation du fencing`);
+          logger.warn(`[BACKUP] Nœud ${node.name} offline depuis ${pollCount} polls - programmation du fencing`);
           this.scheduleFence(node.name);
         }
-      } else if (pollCount === 1 && this.debug) {
-        this.log(`⚠️ Nœud ${node.name} offline (premier poll)`);
+      } else if (pollCount === 1) {
+        logger.debug(`Nœud ${node.name} offline (premier poll)`);
       }
     }
     
@@ -746,7 +748,7 @@ export class SfhaDaemon extends EventEmitter {
    */
   private handleQuorumChange(quorate: boolean): void {
     if (!quorate && this.config?.cluster.quorumRequired) {
-      this.log('⚠️ ' + t('status.noQuorum'));
+      logger.warn(t('status.noQuorum'));
       // En cas de perte de quorum, désactiver les ressources
       if (this.isLeader) {
         this.deactivateResources();
@@ -755,7 +757,7 @@ export class SfhaDaemon extends EventEmitter {
       // Annuler tous les fencings en attente (on n'a plus le quorum)
       this.cancelAllPendingFences('perte de quorum');
     } else if (quorate) {
-      this.log('✅ ' + t('status.quorumOk'));
+      logger.info(t('status.quorumOk'));
       // Quorum restauré, re-élection
       this.checkElection();
     }
@@ -774,7 +776,7 @@ export class SfhaDaemon extends EventEmitter {
     
     if (!node.online && node.previousState === true) {
       // === NŒUD VIENT DE DISPARAÎTRE ===
-      this.log(`⚠️ Nœud ${node.name} n'est plus dans le cluster`);
+      logger.warn(`Nœud ${node.name} n'est plus dans le cluster`);
       
       // Vérifier les conditions pour le fencing
       if (!this.shouldFenceNode(node.name)) {
@@ -786,7 +788,7 @@ export class SfhaDaemon extends EventEmitter {
       
     } else if (node.online && node.previousState === false) {
       // === NŒUD REVIENT EN LIGNE ===
-      this.log(`✅ Nœud ${node.name} est de retour dans le cluster`);
+      logger.info(`Nœud ${node.name} est de retour dans le cluster`);
       
       // Annuler le fencing en attente
       this.cancelPendingFence(node.name);
@@ -805,32 +807,32 @@ export class SfhaDaemon extends EventEmitter {
   private shouldFenceNode(nodeName: string): boolean {
     // 1. STONITH activé ?
     if (!this.config?.stonith?.enabled) {
-      this.log(`ℹ️ STONITH désactivé - pas de fencing pour ${nodeName}`);
+      logger.debug(`STONITH désactivé - pas de fencing pour ${nodeName}`);
       return false;
     }
     
     // 2. FenceCoordinator prêt ?
     if (!this.fenceCoordinator) {
-      this.log(`⚠️ FenceCoordinator non initialisé - pas de fencing pour ${nodeName}`);
+      logger.warn(`FenceCoordinator non initialisé - pas de fencing pour ${nodeName}`);
       return false;
     }
     
     // 3. Quorum ? (seul le cluster majoritaire peut fence)
     const quorum = getQuorumStatus();
     if (!quorum.quorate && this.config.stonith.safety.requireQuorum) {
-      this.log(`⚠️ Pas de quorum - pas de fencing pour ${nodeName}`);
+      logger.warn(`Pas de quorum - pas de fencing pour ${nodeName}`);
       return false;
     }
     
     // 4. On est leader ? (éviter que tous les nœuds fencent en même temps)
     if (!this.isLeader) {
-      this.log(`ℹ️ Pas leader - le leader va fence ${nodeName}`);
+      logger.debug(`Pas leader - le leader va fence ${nodeName}`);
       return false;
     }
     
     // 5. Le nœud est-il configuré dans STONITH ?
     if (!this.config.stonith.nodes[nodeName]) {
-      this.log(`⚠️ Nœud ${nodeName} non configuré dans STONITH - pas de fencing`);
+      logger.warn(`Nœud ${nodeName} non configuré dans STONITH - pas de fencing`);
       return false;
     }
     
@@ -845,7 +847,7 @@ export class SfhaDaemon extends EventEmitter {
     this.cancelPendingFence(nodeName);
     
     const fenceDelay = this.config?.stonith?.safety?.fenceDelayOnNodeLeft || 10;
-    this.log(`⏳ Fencing de ${nodeName} programmé dans ${fenceDelay}s (délai de grâce)`);
+    logger.info(`Fencing de ${nodeName} programmé dans ${fenceDelay}s (délai de grâce)`);
     
     const timer = setTimeout(async () => {
       // Supprimer le timer de la map
@@ -856,7 +858,7 @@ export class SfhaDaemon extends EventEmitter {
       const nodeStillOffline = !nodes.find(n => n.name === nodeName && n.online);
       
       if (!nodeStillOffline) {
-        this.log(`✅ Nœud ${nodeName} est revenu - fencing annulé`);
+        logger.info(`Nœud ${nodeName} est revenu - fencing annulé`);
         return;
       }
       
@@ -866,18 +868,18 @@ export class SfhaDaemon extends EventEmitter {
       }
       
       // FENCE !
-      this.log(`🔴 STONITH: Fencing du nœud ${nodeName} (absent depuis ${fenceDelay}s)`);
+      logger.warn(`STONITH: Fencing du nœud ${nodeName} (absent depuis ${fenceDelay}s)`);
       try {
         const result = await this.fenceCoordinator!.fence(nodeName, false);
         if (result.success) {
-          this.log(`✅ STONITH: ${nodeName} fencé avec succès`);
+          logger.info(`STONITH: ${nodeName} fencé avec succès`);
         } else if (result.action === 'skipped') {
-          this.log(`⚠️ STONITH skipped pour ${nodeName}: ${result.reason}`);
+          logger.warn(`STONITH skipped pour ${nodeName}: ${result.reason}`);
         } else {
-          this.log(`❌ STONITH: Échec du fence de ${nodeName}: ${result.reason}`);
+          logger.error(`STONITH: Échec du fence de ${nodeName}: ${result.reason}`);
         }
       } catch (error: any) {
-        this.log(`❌ Erreur STONITH sur ${nodeName}: ${error.message}`);
+        logger.error(`Erreur STONITH sur ${nodeName}: ${error.message}`);
       }
     }, fenceDelay * 1000);
     
@@ -892,7 +894,7 @@ export class SfhaDaemon extends EventEmitter {
     if (timer) {
       clearTimeout(timer);
       this.pendingFenceTimers.delete(nodeName);
-      this.log(`✅ Fencing de ${nodeName} annulé (nœud revenu)`);
+      logger.info(`Fencing de ${nodeName} annulé (nœud revenu)`);
     }
   }
 
@@ -901,7 +903,7 @@ export class SfhaDaemon extends EventEmitter {
    */
   private cancelAllPendingFences(reason: string): void {
     if (this.pendingFenceTimers.size > 0) {
-      this.log(`🚫 Annulation de ${this.pendingFenceTimers.size} fencing(s) en attente: ${reason}`);
+      logger.warn(`Annulation de ${this.pendingFenceTimers.size} fencing(s) en attente: ${reason}`);
       for (const [nodeName, timer] of this.pendingFenceTimers) {
         clearTimeout(timer);
       }
@@ -918,7 +920,7 @@ export class SfhaDaemon extends EventEmitter {
    */
   private async handleHealthChange(name: string, healthy: boolean, result: HealthResult): Promise<void> {
     if (!healthy) {
-      this.log(`⚠️ ${t('health.failed', { resource: name, error: result.lastError || 'inconnu' })}`);
+      logger.warn(t('health.failed', { resource: name, error: result.lastError || 'inconnu' }));
       
       // Trouver le service concerné
       const service = this.config?.services.find(s => s.name === name);
@@ -929,11 +931,10 @@ export class SfhaDaemon extends EventEmitter {
       const criticalThreshold = maxFailures + 2; // Échecs supplémentaires avant failover
       
       if (result.consecutiveFailures >= criticalThreshold) {
-        this.log(`🔴 ${name} a dépassé le seuil critique (${result.consecutiveFailures} échecs)`);
+        logger.error(`${name} a dépassé le seuil critique (${result.consecutiveFailures} échecs)`);
         
         // Tentative de redémarrage du service
-        // Import statique en haut du fichier
-        this.log(`🔄 Tentative de redémarrage de ${service.unit}...`);
+        logger.info(`Tentative de redémarrage de ${service.unit}...`);
         
         const restartResult = restartService(service.unit);
         
@@ -941,22 +942,22 @@ export class SfhaDaemon extends EventEmitter {
           // Attendre un peu et vérifier
           await new Promise(resolve => setTimeout(resolve, 3000));
           if (isServiceActive(service.unit)) {
-            this.log(`✅ ${service.name} redémarré avec succès`);
+            logger.info(`${service.name} redémarré avec succès`);
             return;
           }
         }
         
         // Échec du redémarrage - déclencher le failover
-        this.log(`🚨 ${t('health.failoverTriggered', { resource: name })}`);
+        logger.error(t('health.failoverTriggered', { resource: name }));
         
         try {
           await this.failover();
         } catch (error: any) {
-          this.log(`❌ Échec du failover: ${error.message}`);
+          logger.error(`Échec du failover: ${error.message}`);
         }
       }
     } else {
-      this.log(`✅ ${t('health.passed', { resource: name })}`);
+      logger.info(t('health.passed', { resource: name }));
     }
     
     this.emit('healthChange', name, healthy, result);
@@ -971,14 +972,14 @@ export class SfhaDaemon extends EventEmitter {
     this.standby = standby;
     
     if (standby) {
-      this.log(t('action.standbyOn', { node: this.config?.node.name || 'local' }));
+      logger.info(t('action.standbyOn', { node: this.config?.node.name || 'local' }));
       // Si leader, désactiver les ressources
       if (this.isLeader) {
         this.deactivateResources();
         this.isLeader = false;
       }
     } else {
-      this.log(t('action.standbyOff', { node: this.config?.node.name || 'local' }));
+      logger.info(t('action.standbyOff', { node: this.config?.node.name || 'local' }));
       // Re-élection
       this.checkElection();
     }
@@ -997,7 +998,7 @@ export class SfhaDaemon extends EventEmitter {
       throw new Error(t('error.notLeader'));
     }
     
-    this.log(t('action.failoverInitiated', { node: targetNode || 'suivant' }));
+    logger.info(t('action.failoverInitiated', { node: targetNode || 'suivant' }));
     
     // Désactiver les ressources locales
     this.deactivateResources();
