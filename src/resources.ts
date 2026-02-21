@@ -15,6 +15,7 @@ export interface ResourceState {
   name: string;
   type: 'vip' | 'service';
   active: boolean;
+  healthy?: boolean;
   error?: string;
 }
 

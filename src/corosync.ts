@@ -246,6 +246,11 @@ export function getClusterNodes(): ClusterNode[] {
       }
     }
     
+    // DEBUG: Log des IDs trouvés
+    if (process.env.SFHA_DEBUG) {
+      console.log(`[corosync] cmapctl found onlineNodeIds: ${Array.from(onlineNodeIds).join(', ')}`);
+    }
+    
     if (onlineNodeIds.size > 0) {
       for (const node of nodes) {
         node.online = onlineNodeIds.has(node.nodeId);

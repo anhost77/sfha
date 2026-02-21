@@ -26,7 +26,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.5';
+const VERSION = '1.0.9';
 
 function getVersion(): string {
   return VERSION;
@@ -1270,6 +1270,40 @@ program
   .command('reload')
   .description('Recharger la configuration')
   .action(reloadCommand);
+
+program
+  .command('token')
+  .description('Afficher le token pour ajouter un nouveau nœud au cluster')
+  .option('--ip <ip>', 'IP mesh à assigner au nouveau nœud (auto sinon)')
+  .option('-j, --json', 'Sortie JSON')
+  .action(tokenCommand);
+
+async function tokenCommand(options: { ip?: string; json?: boolean; lang?: string }): Promise<void> {
+  initI18n(options.lang);
+
+  const mesh = getMeshManager();
+  const result = mesh.generateToken(options.ip);
+
+  if (!result.success) {
+    if (options.json) {
+      console.log(JSON.stringify({ success: false, error: result.error }));
+    } else {
+      console.error(colorize('Erreur:', 'red'), result.error);
+    }
+    process.exit(1);
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify({ success: true, token: result.token }));
+  } else {
+    console.log(colorize('Token de join:', 'blue'));
+    console.log('');
+    console.log(colorize(result.token!, 'cyan'));
+    console.log('');
+    console.log('Pour ajouter un nœud au cluster, exécutez sur le nouveau nœud:');
+    console.log(`  sfha join ${result.token}`);
+  }
+}
 
 // ============================================
 // STONITH Subcommands

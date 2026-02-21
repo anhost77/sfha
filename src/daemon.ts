@@ -15,6 +15,7 @@ import { FenceCoordinator, createFenceCoordinator, StonithStatus, FenceHistoryEn
 import { t, initI18n } from './i18n.js';
 import { logger, setLogLevel, createSimpleLogger } from './utils/logger.js';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { getMeshManager } from './mesh/index.js';
 
 // ============================================
 // Types
@@ -53,6 +54,10 @@ export interface DaemonStatus {
     clusterName: string;
     nodeName: string;
   };
+  /** Token pour ajouter des nœuds au cluster (si mesh configuré) */
+  joinToken?: string;
+  /** Interface réseau du mesh WireGuard (ex: wg1) */
+  meshInterface?: string;
 }
 
 export interface DaemonOptions {
@@ -66,7 +71,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.5';
+const VERSION = '1.0.7';
 
 // ============================================
 // Daemon
@@ -1148,8 +1153,19 @@ export class SfhaDaemon extends EventEmitter {
       healthData[key] = value;
     }
     
-    const leaderName = this.electionManager?.getState().leaderName ?? null;
     const localNodeName = this.config?.node.name || '';
+    
+    // FIX: Toujours faire une élection fraîche pour avoir des données cohérentes
+    // Le cache de l'election manager peut être désynchronisé
+    const freshElection = electLeader();
+    const leaderName = freshElection?.leaderName ?? null;
+    const actualIsLeader = freshElection?.isLocalLeader ?? false;
+    
+    // Synchroniser this.isLeader si désynchronisé (cas de race condition)
+    if (this.isLeader !== actualIsLeader) {
+      logger.debug(`getStatus: sync isLeader ${this.isLeader} -> ${actualIsLeader}`);
+      this.isLeader = actualIsLeader;
+    }
     const localNodeId = getLocalNodeId();
     
     return {
@@ -1172,7 +1188,10 @@ export class SfhaDaemon extends EventEmitter {
         isLocal: n.nodeId === localNodeId,
       })),
       vips: this.config ? getVipsState(this.config.vips) : [],
-      services: this.resourceManager?.getState() || [],
+      services: (this.resourceManager?.getState() || []).map(svc => ({
+        ...svc,
+        healthy: healthData[svc.name]?.healthy ?? undefined,
+      })),
       health: healthData,
       stonith: {
         enabled: this.config?.stonith?.enabled || false,
@@ -1183,7 +1202,35 @@ export class SfhaDaemon extends EventEmitter {
         clusterName: this.config?.cluster.name || '',
         nodeName: localNodeName,
       },
+      joinToken: this.getJoinToken(),
+      meshInterface: this.getMeshInterface(),
     };
+  }
+
+  /**
+   * Récupère l'interface mesh WireGuard
+   */
+  private getMeshInterface(): string | undefined {
+    try {
+      const mesh = getMeshManager();
+      const status = mesh.getStatus();
+      return status.active ? status.interface : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Génère le token pour ajouter des nœuds (si mesh configuré)
+   */
+  private getJoinToken(): string | undefined {
+    try {
+      const mesh = getMeshManager();
+      const result = mesh.generateToken();
+      return result.success ? result.token : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

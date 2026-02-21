@@ -34,6 +34,12 @@ export function electLeader(requireQuorum: boolean = false): ElectionResult | nu
   const quorum = getQuorumStatus();
   const standbyNodes = getStandbyNodes(); // Nœuds en standby via cmap
   
+  // DEBUG: Log des nœuds pour diagnostic
+  if (process.env.SFHA_DEBUG) {
+    console.log(`[election] getClusterNodes() returned: ${JSON.stringify(nodes.map(n => ({ name: n.name, nodeId: n.nodeId, online: n.online })))}`);
+    console.log(`[election] localNodeId: ${localNodeId}, standbyNodes: ${Array.from(standbyNodes).join(', ')}`);
+  }
+  
   // BUG FIX #2: Option pour exiger le quorum
   if (requireQuorum && !quorum.quorate) {
     return null;
@@ -42,6 +48,11 @@ export function electLeader(requireQuorum: boolean = false): ElectionResult | nu
   // Filtrer les nœuds en ligne ET pas en standby
   // Les nœuds en standby publient leur état via corosync-cmapctl
   const eligibleNodes = nodes.filter(n => n.online && !standbyNodes.has(n.name));
+  
+  // DEBUG: Log des nœuds éligibles
+  if (process.env.SFHA_DEBUG) {
+    console.log(`[election] eligibleNodes: ${JSON.stringify(eligibleNodes.map(n => ({ name: n.name, nodeId: n.nodeId })))}`);
+  }
   
   if (eligibleNodes.length === 0) {
     return null;

@@ -256,13 +256,54 @@ export class MeshManager {
     // Allouer une IP si non spécifiée
     let meshIp = options.meshIp;
     if (!meshIp) {
-      // Utiliser l'IP assignée dans le token v2 si disponible
+      // BUG FIX: Ne pas utiliser token.assignedIp car il est statique et identique pour tous les nœuds
+      // qui utilisent le même token. À la place, on calcule une IP unique basée sur usedIps
+      // plus un facteur aléatoire pour éviter les collisions.
+      const usedIps = token.usedIps || [token.meshIp];
+      
+      // Si token.assignedIp existe, l'ajouter aux IPs utilisées pour éviter les conflits
       if (token.assignedIp) {
-        meshIp = token.assignedIp;
-      } else {
-        // Fallback: calculer depuis les IPs utilisées
-        const usedIps = token.usedIps || [token.meshIp];
-        meshIp = allocateNextIp(token.meshNetwork, usedIps);
+        usedIps.push(token.assignedIp.split('/')[0]);
+      }
+      
+      // Ajouter les IPs des peers existants
+      if (token.peers) {
+        for (const p of token.peers) {
+          if (p.meshIp && !usedIps.includes(p.meshIp)) {
+            usedIps.push(p.meshIp);
+          }
+        }
+      }
+      
+      // Générer une IP unique en essayant plusieurs fois si nécessaire
+      // On utilise un hash du hostname + timestamp pour départager les nœuds simultanés
+      const { hostname: getHostname } = await import('os');
+      const hostname = getHostname();
+      const uniqueSeed = Date.now() % 1000 + hostname.split('').reduce((a: number, c: string) => a + c.charCodeAt(0), 0);
+      
+      // Tenter d'allouer la prochaine IP disponible
+      meshIp = allocateNextIp(token.meshNetwork, usedIps);
+      
+      // Si plusieurs nœuds joignent simultanément, décaler l'IP par le seed
+      const [baseIp, cidr] = meshIp.split('/');
+      const ipParts = baseIp.split('.').map(Number);
+      const baseNum = (ipParts[0] << 24) + (ipParts[1] << 16) + (ipParts[2] << 8) + ipParts[3];
+      
+      // Ajouter un offset basé sur le dernier octet du hostname hash (0-255)
+      const offset = uniqueSeed % 250;
+      
+      // Vérifier si cette IP serait en conflit, sinon utiliser l'allocation de base
+      const candidateNum = baseNum + offset;
+      const candidateOctets = [
+        (candidateNum >>> 24) & 255,
+        (candidateNum >>> 16) & 255,
+        (candidateNum >>> 8) & 255,
+        candidateNum & 255,
+      ];
+      const candidateIp = candidateOctets.join('.');
+      
+      if (!usedIps.includes(candidateIp) && offset > 0) {
+        meshIp = `${candidateIp}/${cidr}`;
       }
     }
 
