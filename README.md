@@ -57,6 +57,16 @@ sfha --version
 - **Corosync** : Installé automatiquement comme dépendance
 - **WireGuard** : `apt install wireguard-tools` (optionnel, pour le mesh)
 
+### Ports réseau requis
+
+| Port | Protocole | Usage |
+|------|-----------|-------|
+| 5405 | UDP | Corosync (communication cluster) |
+| 51820 | UDP | WireGuard mesh (si activé) |
+| **7777** | TCP | **Coordination P2P sfha** (interne, sur IP mesh uniquement) |
+
+> ⚠️ Le port **7777** doit rester disponible sur chaque nœud. Il est utilisé pour la synchronisation de l'état standby entre les nœuds du cluster. Ce port n'écoute que sur l'interface mesh WireGuard (10.x.x.x) et n'est pas exposé sur les interfaces publiques.
+
 ---
 
 ## 🚀 Quick Start
