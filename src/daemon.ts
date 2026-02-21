@@ -682,59 +682,21 @@ export class SfhaDaemon extends EventEmitter {
       this.ensureNoVipOnFollower();
     }
     
-    // Si on n'est pas leader et pas en standby, vérifier si le leader actuel a la VIP
-    // Si non, on peut potentiellement prendre le relai
-    // MAIS PAS pendant la période de grâce de démarrage (le leader légitime peut être en train de démarrer)
-    if (!this.isLeader && !this.standby && !this.startupGracePeriod && this.config) {
-      // BUG FIX: Utiliser arping pour vérifier si la VIP est active sur le RÉSEAU
-      // getVipsState() vérifie uniquement les IPs locales, pas si un autre nœud a la VIP
-      const anyVipActive = isAnyVipReachable(this.config.vips, 1);
-      
-      // Si aucune VIP n'est active nulle part, c'est peut-être que le leader est down
-      if (!anyVipActive) {
-        // BUG FIX #2: Vérifier le quorum AVANT de considérer la prise de leadership
-        if (!state.quorum.quorate) {
-          logger.warn('VIP absente mais pas de quorum - pas de prise de leadership');
-          this.pollsWithoutVip = 0;
-          this.emit('poll', state);
-          return;
-        }
-        
-        // Incrémenter le compteur de polls sans VIP
-        this.pollsWithoutVip = (this.pollsWithoutVip || 0) + 1;
-        logger.warn(`[TRACE] pollsWithoutVip incr to ${this.pollsWithoutVip}`);
-        
-        // Après 2 polls sans VIP, vérifier si on est le "next in line" pour le leadership
-        // Après 5 polls, forcer le takeover (backup safety - 25s max)
-        if (this.pollsWithoutVip >= 5) {
-          logger.warn(`VIP absente depuis ${this.pollsWithoutVip} polls - FORCE TAKEOVER (backup)`);
-          this.becomeLeader(true); // Force=true bypass la vérification d'élection
-          this.pollsWithoutVip = 0;
-        } else if (this.pollsWithoutVip >= 2) {
-          // Le leader élu (selon Corosync) est probablement en standby applicatif
-          // Vérifier si on est le prochain candidat dans l'ordre d'élection
-          const currentLeader = this.electionManager?.getState().leaderName;
-          if (currentLeader) {
-            const nextCandidate = getNextLeaderCandidate(currentLeader);
-            if (nextCandidate?.isLocalLeader) {
-              logger.warn(`VIP absente depuis ${this.pollsWithoutVip} polls, leader ${currentLeader} probablement en standby - prise de relai (next in line)`);
-              this.becomeLeader(true); // Bypass election check car on est le next candidate légitime
-              this.pollsWithoutVip = 0;
-            } else {
-              logger.info(`VIP absente mais ce nœud n'est pas next in line (prochain: ${nextCandidate?.leaderName || 'aucun'})`);
-            }
-          } else {
-            logger.warn(`VIP absente depuis ${this.pollsWithoutVip} polls - tentative de prise de leadership`);
-            this.becomeLeader(true); // Pas de leader connu, force takeover
-            this.pollsWithoutVip = 0;
-          }
-        } else {
-          logger.warn(`Aucune VIP active détectée (${this.pollsWithoutVip}/2)...`);
-        }
-      } else {
-        this.pollsWithoutVip = 0;
-      }
-    }
+    // DISABLED: Force takeover based on VIP detection
+    // This caused split-brain where all nodes took the VIP simultaneously
+    // because arping responds to local VIP too.
+    // 
+    // The proper failover mechanism is:
+    // 1. Leader goes down (corosync detects via heartbeat)
+    // 2. Corosync triggers new election
+    // 3. New leader is elected via electLeader() (lowest nodeId)
+    // 4. handleLeaderChange() activates resources on new leader
+    //
+    // If a service fails on the leader, sfha should:
+    // 1. Try to restart the service (restart_service: true)
+    // 2. If restart fails, put the node in standby
+    // 3. This triggers a leadership change via Corosync
+    this.pollsWithoutVip = 0;
     
     // STONITH - Détecter les nœuds morts et déclencher le fencing
     // Seulement si on est leader et qu'on a le quorum
@@ -844,13 +806,16 @@ export class SfhaDaemon extends EventEmitter {
       // === NŒUD VIENT DE DISPARAÎTRE ===
       logger.warn(`Nœud ${node.name} n'est plus dans le cluster`);
       
-      // Vérifier les conditions pour le fencing
-      if (!this.shouldFenceNode(node.name)) {
-        return;
+      // IMPORTANT: D'abord re-élire un nouveau leader
+      // Le nouveau leader sera responsable du fencing
+      this.checkElection();
+      
+      // Ensuite, si on est maintenant le leader, programmer le fencing
+      if (this.shouldFenceNode(node.name)) {
+        this.scheduleFence(node.name);
       }
       
-      // Programmer le fencing avec délai de grâce
-      this.scheduleFence(node.name);
+      return;
       
     } else if (node.online && node.previousState === false) {
       // === NŒUD REVIENT EN LIGNE ===
