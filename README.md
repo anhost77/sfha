@@ -11,14 +11,14 @@
 # sfha — Haute Disponibilité légère pour Linux
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.0.5-green.svg)](package.json)
 [![Debian](https://img.shields.io/badge/Debian-11%2B-red.svg)](https://www.debian.org/)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%2B-orange.svg)](https://ubuntu.com/)
 [![Made in France](https://img.shields.io/badge/Made%20in-France%20🇫🇷-blue.svg)](#)
 
 **sfha** (Simple Fast High Availability) est un système de haute disponibilité léger et moderne, conçu comme alternative minimaliste à Pacemaker.
 
-🚀 **~2500 lignes de code** | 📦 **56KB installé** | ⚡ **Zéro I/O disque** | 🇫🇷 **CLI en français**
+🚀 **~2500 lignes de code** | 📦 **27MB standalone** | ⚡ **Zéro I/O disque** | 🇫🇷 **CLI en français**
 
 ---
 
@@ -40,8 +40,11 @@
 ## 📦 Installation rapide
 
 ```bash
-# Debian / Ubuntu
-sudo apt install ./sfha_1.0.0_amd64.deb
+# Télécharger le .deb depuis les releases GitHub
+wget https://github.com/anhost77/sfha/releases/latest/download/sfha_1.0.5_amd64.deb
+
+# Installer (aucune dépendance requise sauf corosync)
+sudo dpkg -i sfha_1.0.5_amd64.deb
 
 # Vérifier l'installation
 sfha --version
@@ -50,9 +53,9 @@ sfha --version
 ### Prérequis
 
 - **OS** : Debian 11/12/13, Ubuntu 22.04/24.04
-- **Node.js** ≥ 18 (inclus dans le .deb en bundle)
-- **WireGuard** : `apt install wireguard-tools` (pour le mesh)
-- **Corosync** ≥ 3.0 (généré automatiquement par `sfha init`)
+- **Node.js** : ❌ **Non requis** (embarqué dans le .deb)
+- **Corosync** : Installé automatiquement comme dépendance
+- **WireGuard** : `apt install wireguard-tools` (optionnel, pour le mesh)
 
 ---
 
@@ -263,7 +266,7 @@ logging:
 | Critère | Pacemaker | keepalived | sfha |
 |---------|-----------|------------|------|
 | **Lignes de code** | ~500K | ~50K | ~2.5K |
-| **Taille installée** | ~50 MB | ~500 KB | ~56 KB |
+| **Taille installée** | ~50 MB | ~500 KB | ~27 MB (standalone) |
 | **I/O disque** | Élevé (CIB XML) | Faible | **Zéro** |
 | **Configuration** | XML complexe | Config texte | **YAML simple** |
 | **STONITH** | 100+ agents | ❌ | Proxmox (extensible) |
@@ -355,21 +358,31 @@ Vérifier : `sfha health`
 
 ```bash
 # Cloner
-git clone https://github.com/serverflow/sfha.git
+git clone https://github.com/anhost77/sfha.git
 cd sfha
 
 # Installer les dépendances
-npm install
+pnpm install
 
-# Build
-npm run build
+# Build TypeScript
+pnpm build
 
 # Tests
-npm test
+pnpm test
 
-# Construire le .deb
-./scripts/build-deb.sh
+# Construire le .deb standalone (Node.js embarqué, ~27MB)
+./scripts/build-deb-standalone.sh
+
+# Ou construire le .deb léger (nécessite Node.js sur la cible, ~3.6MB)
+./scripts/build-deb-nodejs.sh
 ```
+
+### Scripts de build
+
+| Script | Taille | Node.js requis |
+|--------|--------|----------------|
+| `build-deb-standalone.sh` | ~27MB | ❌ Non (embarqué) |
+| `build-deb-nodejs.sh` | ~3.6MB | ✅ Oui (dépendance) |
 
 ---
 
