@@ -3,8 +3,8 @@ Version: 1.0.0
 Section: admin
 Priority: optional
 Architecture: amd64
-Depends: corosync (>= 3.0), iputils-arping | arping, iproute2
-Recommends: corosync-qdevice, wireguard-tools
+Depends: corosync (>= 3.0), iputils-arping | arping, iproute2, wireguard-tools
+Recommends: corosync-qdevice
 Maintainer: ServerFlow <contact@serverflow.io>
 Description: Système de haute disponibilité léger pour Linux
  sfha est un gestionnaire de ressources HA minimal qui fonctionne avec
