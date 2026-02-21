@@ -27,12 +27,21 @@ export interface ElectionResult {
  * Règle: le nœud avec le plus petit nodeId parmi les nœuds en ligne devient leader
  * 
  * @param requireQuorum Si true, retourne null si pas de quorum (défaut: false pour compatibilité)
+ * @param additionalStandbyNodes Nœuds supplémentaires en standby (depuis P2P state)
  */
-export function electLeader(requireQuorum: boolean = false): ElectionResult | null {
+export function electLeader(requireQuorum: boolean = false, additionalStandbyNodes?: Set<string>): ElectionResult | null {
   const nodes = getClusterNodes();
   const localNodeId = getLocalNodeId();
   const quorum = getQuorumStatus();
-  const standbyNodes = getStandbyNodes(); // Nœuds en standby via cmap
+  const cmapStandbyNodes = getStandbyNodes(); // Nœuds en standby via cmap (local)
+  
+  // Fusionner les standby locaux et P2P
+  const standbyNodes = new Set([...cmapStandbyNodes]);
+  if (additionalStandbyNodes) {
+    for (const name of additionalStandbyNodes) {
+      standbyNodes.add(name);
+    }
+  }
   
   // DEBUG: Log des nœuds pour diagnostic
   if (process.env.SFHA_DEBUG) {
@@ -46,7 +55,6 @@ export function electLeader(requireQuorum: boolean = false): ElectionResult | nu
   }
   
   // Filtrer les nœuds en ligne ET pas en standby
-  // Les nœuds en standby publient leur état via corosync-cmapctl
   const eligibleNodes = nodes.filter(n => n.online && !standbyNodes.has(n.name));
   
   // DEBUG: Log des nœuds éligibles
@@ -155,9 +163,10 @@ export class ElectionManager {
 
   /**
    * Effectue une élection et notifie si changement
+   * @param additionalStandbyNodes Nœuds supplémentaires en standby (depuis P2P state)
    */
-  checkElection(): ElectionResult | null {
-    const result = electLeader();
+  checkElection(additionalStandbyNodes?: Set<string>): ElectionResult | null {
+    const result = electLeader(false, additionalStandbyNodes);
     
     if (!result) {
       // Pas de nœuds en ligne

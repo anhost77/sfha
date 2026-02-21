@@ -16,6 +16,7 @@ import { t, initI18n } from './i18n.js';
 import { logger, setLogLevel, createSimpleLogger } from './utils/logger.js';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { getMeshManager } from './mesh/index.js';
+import { P2PStateManager, initP2PStateManager } from './p2p-state.js';
 
 // ============================================
 // Types
@@ -93,6 +94,7 @@ export class SfhaDaemon extends EventEmitter {
   private electionManager: ElectionManager | null = null;
   private controlServer: ControlServer | null = null;
   private fenceCoordinator: FenceCoordinator | null = null;
+  private p2pStateManager: P2PStateManager | null = null;
   
   // Tracking des nœuds morts pour STONITH
   private deadNodePolls: Map<string, number> = new Map();
@@ -238,6 +240,18 @@ export class SfhaDaemon extends EventEmitter {
       }
     }
     
+    // Initialiser le P2P state manager pour la coordination entre nœuds
+    this.p2pStateManager = initP2PStateManager({
+      port: 7777,
+      pollIntervalMs: this.config!.cluster.pollIntervalMs || 5000,
+    });
+    this.p2pStateManager.start(this.config!.node.name);
+    this.p2pStateManager.onStateChange(() => {
+      // Quand un état distant change, re-vérifier l'élection
+      logger.debug('P2P: État distant changé, re-élection...');
+      this.checkElection();
+    });
+    
     // Configurer les callbacks
     this.electionManager.onLeaderChange((isLeader, leaderName) => {
       this.handleLeaderChange(isLeader, leaderName);
@@ -282,6 +296,9 @@ export class SfhaDaemon extends EventEmitter {
     
     // Arrêter le serveur de contrôle
     this.controlServer?.stop();
+    
+    // Arrêter le P2P state manager
+    this.p2pStateManager?.stop();
     
     // Désactiver les ressources si leader
     if (this.isLeader) {
@@ -493,10 +510,17 @@ export class SfhaDaemon extends EventEmitter {
   private checkElection(): void {
     if (!this.electionManager) return;
     
+    // Récupérer les nœuds en standby depuis le P2P state manager
+    const p2pStandbyNodes = this.p2pStateManager?.getStandbyNodes() || new Set<string>();
+    
+    if (p2pStandbyNodes.size > 0) {
+      logger.info(`checkElection: ${p2pStandbyNodes.size} nœuds P2P en standby: ${Array.from(p2pStandbyNodes).join(', ')}`);
+    }
+    
     // Si en standby, ne pas participer à l'élection en tant que leader potentiel
     if (this.standby) {
       // Mais vérifier quand même qui est le leader pour les logs
-      const result = this.electionManager.checkElection();
+      const result = this.electionManager.checkElection(p2pStandbyNodes);
       if (result?.isLocalLeader) {
         // On est le leader élu mais en standby - on refuse le leadership
         this.isLeader = false;
@@ -505,7 +529,10 @@ export class SfhaDaemon extends EventEmitter {
       return;
     }
     
-    this.electionManager.checkElection();
+    const result = this.electionManager.checkElection(p2pStandbyNodes);
+    if (result) {
+      logger.info(`checkElection: résultat = leader=${result.leaderName}, isLocalLeader=${result.isLocalLeader}`);
+    }
   }
 
   /**
@@ -575,6 +602,10 @@ export class SfhaDaemon extends EventEmitter {
       this.pollsAsSecondary = 0;
       this.isLeader = false;
       this.deactivateResources();
+      // Mettre à jour le P2P state
+      if (this.p2pStateManager) {
+        this.p2pStateManager.setLocalState(this.standby, false);
+      }
       this.emit('leaderChange', false, leaderName);
       return;
     }
@@ -591,6 +622,10 @@ export class SfhaDaemon extends EventEmitter {
         return;
       }
       this.activateResources();
+      // Mettre à jour le P2P state
+      if (this.p2pStateManager) {
+        this.p2pStateManager.setLocalState(this.standby, true);
+      }
     }
     
     this.emit('leaderChange', isLeader, leaderName);
@@ -712,13 +747,26 @@ export class SfhaDaemon extends EventEmitter {
    * Appelé à chaque poll pour garantir la cohérence
    */
   private ensureNoVipOnFollower(): void {
+    logger.debug(`WATCHDOG check: isLeader=${this.isLeader}, standby=${this.standby}`);
     if (this.isLeader || !this.config) return;
     
     const vipStates = getVipsState(this.config.vips);
     const activeVips = vipStates.filter(v => v.active);
     
     if (activeVips.length > 0) {
+      // IMPORTANT: Vérifier d'abord si on ne devrait pas être leader
+      const p2pStandbyNodes = this.p2pStateManager?.getStandbyNodes() || new Set<string>();
+      const freshElection = electLeader(false, p2pStandbyNodes);
+      
+      if (freshElection?.isLocalLeader) {
+        // On est bien censé être leader ! Ne pas supprimer la VIP.
+        logger.warn(`WATCHDOG: VIP active mais élection dit qu'on est leader - correction isLeader`);
+        this.isLeader = true;
+        return;
+      }
+      
       logger.error('WATCHDOG: VIP active sur un follower ! Désactivation immédiate...');
+      logger.error(`Election says: leader=${freshElection?.leaderName}, isLocalLeader=${freshElection?.isLocalLeader}`);
       for (const vip of activeVips) {
         logger.error(`Suppression de la VIP ${vip.ip} (ne devrait pas être là)`);
       }
@@ -1052,14 +1100,23 @@ export class SfhaDaemon extends EventEmitter {
     this.standby = standby;
     const nodeName = this.config?.node.name || 'unknown';
     
+    // Mettre à jour le P2P state pour que les autres nœuds le voient
+    if (this.p2pStateManager) {
+      this.p2pStateManager.setLocalState(standby, this.isLeader);
+    }
+    
     if (standby) {
       logger.info(t('action.standbyOn', { node: nodeName }));
-      // Publier l'état standby dans Corosync
+      // Publier l'état standby dans Corosync (local, pour compatibilité)
       publishStandbyState(nodeName, true);
       // Si leader, désactiver les ressources
       if (this.isLeader) {
         this.deactivateResources();
         this.isLeader = false;
+        // Update P2P state again with isLeader=false
+        if (this.p2pStateManager) {
+          this.p2pStateManager.setLocalState(standby, false);
+        }
       }
     } else {
       logger.info(t('action.standbyOff', { node: nodeName }));
@@ -1092,8 +1149,13 @@ export class SfhaDaemon extends EventEmitter {
     // Se mettre en standby pour forcer l'élection d'un autre
     this.standby = true;
     
-    // Publier l'état standby dans Corosync pour que les autres nœuds le voient
-    // et puissent prendre le leadership immédiatement
+    // Mettre à jour le P2P state pour que les autres nœuds le voient immédiatement
+    if (this.p2pStateManager) {
+      this.p2pStateManager.setLocalState(true, false);
+      logger.info('État standby publié via P2P');
+    }
+    
+    // Publier aussi l'état standby dans Corosync (local, pour compatibilité)
     const nodeName = this.config?.node.name || 'unknown';
     if (publishStandbyState(nodeName, true)) {
       logger.info(`État standby publié dans Corosync (${nodeName})`);
@@ -1122,7 +1184,9 @@ export class SfhaDaemon extends EventEmitter {
     
     // FIX: Toujours faire une élection fraîche pour avoir des données cohérentes
     // Le cache de l'election manager peut être désynchronisé
-    const freshElection = electLeader();
+    // IMPORTANT: Inclure les standby nodes P2P pour que l'élection soit correcte
+    const p2pStandbyNodes = this.p2pStateManager?.getStandbyNodes() || new Set<string>();
+    const freshElection = electLeader(false, p2pStandbyNodes);
     const leaderName = freshElection?.leaderName ?? null;
     const actualIsLeader = freshElection?.isLocalLeader ?? false;
     
