@@ -48,6 +48,8 @@ export interface StandaloneHealthCheck {
   timeoutMs: number;
   failuresBeforeUnhealthy: number;
   successesBeforeHealthy: number;
+  critical?: boolean;           // Déclenche failover si KO
+  restartService?: string;      // Service systemd à restart avant failover
 }
 
 export interface ServiceConfig {
@@ -55,6 +57,8 @@ export interface ServiceConfig {
   type: 'systemd';
   unit: string;
   healthcheck?: HealthCheckConfig;
+  critical?: boolean;           // Déclenche failover si KO
+  restartService?: boolean;     // Tenter restart avant failover
 }
 
 export interface ColocationConstraint {
@@ -250,6 +254,8 @@ function normalizeService(raw: any): ServiceConfig {
     name: raw.name,
     type: raw.type || 'systemd',
     unit: raw.unit || raw.name,
+    critical: raw.critical ?? false,
+    restartService: raw.restart_service ?? false,
   };
 
   if (raw.healthcheck) {
@@ -279,6 +285,8 @@ function normalizeStandaloneHealthCheck(raw: any): StandaloneHealthCheck {
     timeoutMs: raw.timeout_ms || (raw.timeout ? raw.timeout * 1000 : 5000),
     failuresBeforeUnhealthy: raw.failures_before_unhealthy || 3,
     successesBeforeHealthy: raw.successes_before_healthy || 2,
+    critical: raw.critical ?? false,
+    restartService: raw.restart_service,
   };
 }
 

@@ -3,7 +3,7 @@
  * @description Élection du leader (plus petit nodeId online)
  */
 
-import { ClusterNode, getClusterNodes, getLocalNodeId, getQuorumStatus } from './corosync.js';
+import { ClusterNode, getClusterNodes, getLocalNodeId, getQuorumStatus, getStandbyNodes } from './corosync.js';
 import { t } from './i18n.js';
 
 // ============================================
@@ -32,29 +32,31 @@ export function electLeader(requireQuorum: boolean = false): ElectionResult | nu
   const nodes = getClusterNodes();
   const localNodeId = getLocalNodeId();
   const quorum = getQuorumStatus();
+  const standbyNodes = getStandbyNodes(); // Nœuds en standby via cmap
   
   // BUG FIX #2: Option pour exiger le quorum
   if (requireQuorum && !quorum.quorate) {
     return null;
   }
   
-  // Filtrer les nœuds en ligne
-  const onlineNodes = nodes.filter(n => n.online);
+  // Filtrer les nœuds en ligne ET pas en standby
+  // Les nœuds en standby publient leur état via corosync-cmapctl
+  const eligibleNodes = nodes.filter(n => n.online && !standbyNodes.has(n.name));
   
-  if (onlineNodes.length === 0) {
+  if (eligibleNodes.length === 0) {
     return null;
   }
   
   // Trier par nodeId (plus petit d'abord)
-  onlineNodes.sort((a, b) => a.nodeId - b.nodeId);
+  eligibleNodes.sort((a, b) => a.nodeId - b.nodeId);
   
-  const leader = onlineNodes[0];
+  const leader = eligibleNodes[0];
   
   return {
     leaderId: leader.nodeId,
     leaderName: leader.name,
     isLocalLeader: leader.nodeId === localNodeId,
-    onlineNodes,
+    onlineNodes: eligibleNodes,
     quorate: quorum.quorate,
   };
 }
@@ -73,6 +75,44 @@ export function isLocalNodeLeader(): boolean {
 export function getLeaderName(): string | null {
   const result = electLeader();
   return result?.leaderName ?? null;
+}
+
+/**
+ * Retourne le prochain candidat au leadership après le leader actuel
+ * Utile quand le leader est en standby applicatif et qu'on veut savoir qui prend le relai
+ * 
+ * @param excludeNodeName Nom du nœud à exclure (généralement le leader actuel en standby)
+ * @param requireQuorum Si true, retourne null si pas de quorum
+ */
+export function getNextLeaderCandidate(excludeNodeName: string, requireQuorum: boolean = true): ElectionResult | null {
+  const nodes = getClusterNodes();
+  const localNodeId = getLocalNodeId();
+  const quorum = getQuorumStatus();
+  
+  // Vérifier le quorum si requis
+  if (requireQuorum && !quorum.quorate) {
+    return null;
+  }
+  
+  // Filtrer les nœuds en ligne SAUF le nœud exclu
+  const onlineNodes = nodes.filter(n => n.online && n.name !== excludeNodeName);
+  
+  if (onlineNodes.length === 0) {
+    return null;
+  }
+  
+  // Trier par nodeId (plus petit d'abord)
+  onlineNodes.sort((a, b) => a.nodeId - b.nodeId);
+  
+  const nextLeader = onlineNodes[0];
+  
+  return {
+    leaderId: nextLeader.nodeId,
+    leaderName: nextLeader.name,
+    isLocalLeader: nextLeader.nodeId === localNodeId,
+    onlineNodes,
+    quorate: quorum.quorate,
+  };
 }
 
 // ============================================

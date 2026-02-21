@@ -1,6 +1,6 @@
 {
   "name": "sfha",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "description": "Haute Disponibilité légère pour Linux - Lightweight High Availability",
   "type": "module",
   "private": true,
@@ -29,7 +29,9 @@
     "ubuntu"
   ],
   "pkg": {
-    "targets": ["node20-linux-x64"],
+    "targets": [
+      "node20-linux-x64"
+    ],
     "outputPath": "bin",
     "assets": [
       "locales/**/*"

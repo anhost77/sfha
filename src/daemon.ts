@@ -5,11 +5,11 @@
 
 import { EventEmitter } from 'events';
 import { SfhaConfig, loadConfig } from './config.js';
-import { CorosyncWatcher, CorosyncState, isCorosyncRunning, getQuorumStatus, getClusterNodes } from './corosync.js';
-import { activateAllVips, deactivateAllVips, getVipsState, VipState } from './vip.js';
+import { CorosyncWatcher, CorosyncState, isCorosyncRunning, getQuorumStatus, getClusterNodes, publishStandbyState, clearStandbyState } from './corosync.js';
+import { activateAllVips, deactivateAllVips, getVipsState, isAnyVipReachable, VipState } from './vip.js';
 import { HealthManager, HealthResult } from './health.js';
 import { ResourceManager, ResourceState, restartService, isServiceActive } from './resources.js';
-import { ElectionManager, ElectionResult, electLeader } from './election.js';
+import { ElectionManager, ElectionResult, electLeader, getNextLeaderCandidate } from './election.js';
 import { ControlServer, ControlCommand, ControlResponse } from './control.js';
 import { FenceCoordinator, createFenceCoordinator, StonithStatus, FenceHistoryEntry } from './stonith/index.js';
 import { t, initI18n } from './i18n.js';
@@ -57,7 +57,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.2';
+const VERSION = '1.0.4';
 
 // ============================================
 // Daemon
@@ -115,6 +115,7 @@ export class SfhaDaemon extends EventEmitter {
   loadConfiguration(): void {
     this.config = loadConfig(this.configPath);
     logger.info(`Configuration chargée: ${this.config.cluster.name}`);
+    logger.info(`[DEBUG] Services chargés: ${JSON.stringify(this.config.services)}`);
   }
 
   /**
@@ -509,8 +510,10 @@ export class SfhaDaemon extends EventEmitter {
    * Utilisé quand on détecte que le leader actuel ne fonctionne plus (VIP absente)
    * 
    * IMPORTANT: Vérifie le quorum ET que ce nœud devrait être leader selon l'élection
+   * 
+   * @param force Si true, bypass la vérification d'élection (pour failsafe après VIP absente longtemps)
    */
-  private becomeLeader(): void {
+  private becomeLeader(force: boolean = false): void {
     if (this.isLeader || this.standby) return;
     
     // BUG FIX #2: Vérifier le quorum AVANT de devenir leader
@@ -521,10 +524,15 @@ export class SfhaDaemon extends EventEmitter {
     }
     
     // BUG FIX #3: Vérifier que ce nœud DEVRAIT être leader selon l'élection
-    const election = electLeader();
-    if (!election?.isLocalLeader) {
-      logger.warn(`Ce nœud n'est pas éligible au leadership (leader élu: ${election?.leaderName || 'aucun'})`);
-      return;
+    // Sauf si force=true (VIP absente trop longtemps, le leader est probablement mort)
+    if (!force) {
+      const election = electLeader();
+      if (!election?.isLocalLeader) {
+        logger.warn(`Ce nœud n'est pas éligible au leadership (leader élu: ${election?.leaderName || 'aucun'})`);
+        return;
+      }
+    } else {
+      logger.warn('Force takeover activé - bypass de la vérification d\'élection');
     }
     
     logger.info('Ce nœud devient leader (prise de relai)');
@@ -649,6 +657,7 @@ export class SfhaDaemon extends EventEmitter {
       }
       // BUG FIX #3: Watchdog - même si on n'est pas leader, vérifier qu'on n'a pas la VIP
       this.ensureNoVipOnFollower();
+      logger.debug('[DEBUG] Reset pollsWithoutVip (no quorum)');
       this.pollsWithoutVip = 0;
       this.emit('poll', state);
       return;
@@ -663,8 +672,9 @@ export class SfhaDaemon extends EventEmitter {
     // Si non, on peut potentiellement prendre le relai
     // MAIS PAS pendant la période de grâce de démarrage (le leader légitime peut être en train de démarrer)
     if (!this.isLeader && !this.standby && !this.startupGracePeriod && this.config) {
-      const vipStates = getVipsState(this.config.vips);
-      const anyVipActive = vipStates.some(v => v.active);
+      // BUG FIX: Utiliser arping pour vérifier si la VIP est active sur le RÉSEAU
+      // getVipsState() vérifie uniquement les IPs locales, pas si un autre nœud a la VIP
+      const anyVipActive = isAnyVipReachable(this.config.vips, 1);
       
       // Si aucune VIP n'est active nulle part, c'est peut-être que le leader est down
       if (!anyVipActive) {
@@ -678,12 +688,32 @@ export class SfhaDaemon extends EventEmitter {
         
         // Incrémenter le compteur de polls sans VIP
         this.pollsWithoutVip = (this.pollsWithoutVip || 0) + 1;
+        logger.warn(`[TRACE] pollsWithoutVip incr to ${this.pollsWithoutVip}`);
         
-        // Après 2 polls sans VIP, forcer la prise de leadership (failover rapide)
-        if (this.pollsWithoutVip >= 2) {
-          logger.warn('VIP absente depuis 2 polls - tentative de prise de leadership');
-          this.becomeLeader(); // becomeLeader() vérifie maintenant le quorum et l'éligibilité
+        // Après 2 polls sans VIP, vérifier si on est le "next in line" pour le leadership
+        // Après 5 polls, forcer le takeover (backup safety - 25s max)
+        if (this.pollsWithoutVip >= 5) {
+          logger.warn(`VIP absente depuis ${this.pollsWithoutVip} polls - FORCE TAKEOVER (backup)`);
+          this.becomeLeader(true); // Force=true bypass la vérification d'élection
           this.pollsWithoutVip = 0;
+        } else if (this.pollsWithoutVip >= 2) {
+          // Le leader élu (selon Corosync) est probablement en standby applicatif
+          // Vérifier si on est le prochain candidat dans l'ordre d'élection
+          const currentLeader = this.electionManager?.getState().leaderName;
+          if (currentLeader) {
+            const nextCandidate = getNextLeaderCandidate(currentLeader);
+            if (nextCandidate?.isLocalLeader) {
+              logger.warn(`VIP absente depuis ${this.pollsWithoutVip} polls, leader ${currentLeader} probablement en standby - prise de relai (next in line)`);
+              this.becomeLeader(true); // Bypass election check car on est le next candidate légitime
+              this.pollsWithoutVip = 0;
+            } else {
+              logger.info(`VIP absente mais ce nœud n'est pas next in line (prochain: ${nextCandidate?.leaderName || 'aucun'})`);
+            }
+          } else {
+            logger.warn(`VIP absente depuis ${this.pollsWithoutVip} polls - tentative de prise de leadership`);
+            this.becomeLeader(true); // Pas de leader connu, force takeover
+            this.pollsWithoutVip = 0;
+          }
         } else {
           logger.warn(`Aucune VIP active détectée (${this.pollsWithoutVip}/2)...`);
         }
@@ -939,21 +969,32 @@ export class SfhaDaemon extends EventEmitter {
    * Si un service devient défaillant:
    * 1. Tentative de redémarrage du service
    * 2. Si échec après N tentatives, déclenchement du failover
+   * 
+   * Si un health check standalone critique devient défaillant:
+   * 1. Si restartService configuré, tentative de restart
+   * 2. Si échec ou pas de restartService, déclenchement du failover
    */
   private async handleHealthChange(name: string, healthy: boolean, result: HealthResult): Promise<void> {
     if (!healthy) {
       logger.warn(t('health.failed', { resource: name, error: result.lastError || 'inconnu' }));
+      logger.info(`[DEBUG] handleHealthChange: name=${name}, consecutiveFailures=${result.consecutiveFailures}`);
       
-      // Trouver le service concerné
+      // Chercher d'abord dans les services
       const service = this.config?.services.find(s => s.name === name);
-      if (!service) return;
       
-      // Vérifier le nombre d'échecs consécutifs
-      const maxFailures = service.healthcheck?.failuresBeforeUnhealthy || 3;
-      const criticalThreshold = maxFailures + 2; // Échecs supplémentaires avant failover
+      // Sinon chercher dans les health checks standalone
+      const standaloneCheck = this.config?.healthChecks.find(h => h.name === name);
+      logger.info(`[DEBUG] service=${!!service}, standaloneCheck=${!!standaloneCheck}, critical=${service?.critical ?? standaloneCheck?.critical}`);
+      if (service) {
+        logger.info(`[DEBUG] service.critical=${service.critical}, type=${typeof service.critical}`);
+        logger.info(`[DEBUG] service keys: ${Object.keys(service).join(', ')}`);
+      }
       
-      if (result.consecutiveFailures >= criticalThreshold) {
-        logger.error(`${name} a dépassé le seuil critique (${result.consecutiveFailures} échecs)`);
+      if (service) {
+        // === Logique pour les services ===
+        // Dès que le service est détecté comme défaillant (3 échecs par défaut),
+        // on tente un restart immédiat
+        logger.warn(`Service ${name} défaillant après ${result.consecutiveFailures} échecs`);
         
         // Tentative de redémarrage du service
         logger.info(`Tentative de redémarrage de ${service.unit}...`);
@@ -964,20 +1005,58 @@ export class SfhaDaemon extends EventEmitter {
           // Attendre un peu et vérifier
           await new Promise(resolve => setTimeout(resolve, 3000));
           if (isServiceActive(service.unit)) {
-            logger.info(`${service.name} redémarré avec succès`);
+            logger.info(`✅ ${service.name} redémarré avec succès`);
             return;
           }
         }
         
-        // Échec du redémarrage - déclencher le failover
-        logger.error(t('health.failoverTriggered', { resource: name }));
+        // Échec du redémarrage - déclencher le failover si service critique
+        logger.error(`❌ Échec du redémarrage de ${service.name}`);
+        if (service.critical || service.restartService) {
+          logger.error(t('health.failoverTriggered', { resource: name }));
+          
+          try {
+            await this.failover();
+          } catch (error: any) {
+            logger.error(`Échec du failover: ${error.message}`);
+          }
+        }
+      } else if (standaloneCheck?.critical) {
+        // === Nouvelle logique pour les health checks standalone critiques ===
+        const criticalThreshold = (standaloneCheck.failuresBeforeUnhealthy || 3) + 2;
         
-        try {
-          await this.failover();
-        } catch (error: any) {
-          logger.error(`Échec du failover: ${error.message}`);
+        if (result.consecutiveFailures >= criticalThreshold) {
+          logger.error(`Health check critique ${name} a dépassé le seuil (${result.consecutiveFailures} échecs)`);
+          
+          // Tenter restart si restartService configuré
+          if (standaloneCheck.restartService) {
+            logger.info(`Tentative de redémarrage de ${standaloneCheck.restartService}...`);
+            
+            const restartResult = restartService(standaloneCheck.restartService);
+            
+            if (restartResult.ok) {
+              // Attendre un peu et vérifier
+              await new Promise(resolve => setTimeout(resolve, 3000));
+              if (isServiceActive(standaloneCheck.restartService)) {
+                logger.info(`${standaloneCheck.restartService} redémarré avec succès`);
+                return;
+              }
+            }
+            
+            logger.error(`Échec du redémarrage de ${standaloneCheck.restartService}`);
+          }
+          
+          // Failover (pas de restart configuré ou restart échoué)
+          logger.error(t('health.failoverTriggered', { resource: name }));
+          
+          try {
+            await this.failover();
+          } catch (error: any) {
+            logger.error(`Échec du failover: ${error.message}`);
+          }
         }
       }
+      // Health checks standalone non-critiques: juste le warning déjà logué
     } else {
       logger.info(t('health.passed', { resource: name }));
     }
@@ -992,16 +1071,21 @@ export class SfhaDaemon extends EventEmitter {
     if (this.standby === standby) return;
     
     this.standby = standby;
+    const nodeName = this.config?.node.name || 'unknown';
     
     if (standby) {
-      logger.info(t('action.standbyOn', { node: this.config?.node.name || 'local' }));
+      logger.info(t('action.standbyOn', { node: nodeName }));
+      // Publier l'état standby dans Corosync
+      publishStandbyState(nodeName, true);
       // Si leader, désactiver les ressources
       if (this.isLeader) {
         this.deactivateResources();
         this.isLeader = false;
       }
     } else {
-      logger.info(t('action.standbyOff', { node: this.config?.node.name || 'local' }));
+      logger.info(t('action.standbyOff', { node: nodeName }));
+      // Nettoyer l'état standby dans Corosync
+      clearStandbyState(nodeName);
       // Re-élection
       this.checkElection();
     }
@@ -1028,6 +1112,13 @@ export class SfhaDaemon extends EventEmitter {
     
     // Se mettre en standby pour forcer l'élection d'un autre
     this.standby = true;
+    
+    // Publier l'état standby dans Corosync pour que les autres nœuds le voient
+    // et puissent prendre le leadership immédiatement
+    const nodeName = this.config?.node.name || 'unknown';
+    if (publishStandbyState(nodeName, true)) {
+      logger.info(`État standby publié dans Corosync (${nodeName})`);
+    }
     
     this.emit('failover', targetNode);
     

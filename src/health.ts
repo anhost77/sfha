@@ -269,6 +269,10 @@ export class HealthManager {
         result.healthy = false;
         this.log(t('health.failed', { resource: service.name, error: check.error || 'inconnu' }));
         this.notifyCallbacks(service.name, false, result);
+      } else if (!result.healthy && service.critical) {
+        // Pour les services critiques, notifier à chaque échec après le seuil initial
+        // pour permettre le déclenchement du failover
+        this.notifyCallbacks(service.name, false, result);
       }
     }
   }
@@ -315,6 +319,10 @@ export class HealthManager {
       if (result.healthy && result.consecutiveFailures >= check.failuresBeforeUnhealthy) {
         result.healthy = false;
         this.log(t('health.failed', { resource: check.name, error: checkResult.error || 'inconnu' }));
+        this.notifyCallbacks(check.name, false, result);
+      } else if (!result.healthy && check.critical) {
+        // Pour les checks critiques, notifier à chaque échec après le seuil initial
+        // pour permettre le déclenchement du failover
         this.notifyCallbacks(check.name, false, result);
       }
     }

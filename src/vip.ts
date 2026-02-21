@@ -155,6 +155,40 @@ export function getVipsState(vips: VipConfig[]): VipState[] {
 }
 
 /**
+ * Vérifie si une VIP est joignable sur le réseau via arping
+ * Utilisé par les followers pour détecter si le leader a la VIP active
+ * 
+ * @param vip Configuration de la VIP
+ * @param timeoutSec Timeout en secondes (default: 1)
+ * @returns true si la VIP répond aux ARP requests
+ */
+export function isVipReachable(vip: VipConfig, timeoutSec: number = 1): boolean {
+  // arping -c 1 -w <timeout> -I <interface> <ip>
+  // -c 1 : envoyer 1 paquet
+  // -w <timeout> : timeout en secondes
+  // -I : interface source
+  // Retourne 0 si une réponse est reçue, 1 sinon
+  const result = runCommand(`arping -c 1 -w ${timeoutSec} -I ${vip.interface} ${vip.ip}`);
+  return result.success;
+}
+
+/**
+ * Vérifie si au moins une VIP est joignable sur le réseau
+ * 
+ * @param vips Liste des VIPs à vérifier
+ * @param timeoutSec Timeout par VIP en secondes (default: 1)
+ * @returns true si au moins une VIP répond
+ */
+export function isAnyVipReachable(vips: VipConfig[], timeoutSec: number = 1): boolean {
+  for (const vip of vips) {
+    if (isVipReachable(vip, timeoutSec)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Active toutes les VIPs
  */
 export function activateAllVips(vips: VipConfig[], log?: (msg: string) => void): boolean {

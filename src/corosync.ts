@@ -515,3 +515,76 @@ export class CorosyncWatcher extends EventEmitter {
     this.emit('poll', state);
   }
 }
+
+// ============================================
+// Standby State via Corosync CMAP
+// ============================================
+
+/**
+ * Publie l'état standby de ce nœud dans corosync-cmap
+ * Les autres nœuds peuvent le lire pour l'élection
+ * 
+ * @param nodeName Nom du nœud
+ * @param standby true si le nœud est en standby
+ * @returns true si la publication a réussi
+ */
+export function publishStandbyState(nodeName: string, standby: boolean): boolean {
+  try {
+    const key = `sfha.node.${nodeName}.standby`;
+    execSync(`corosync-cmapctl -s ${key} u8 ${standby ? 1 : 0}`, {
+      timeout: 2000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return true;
+  } catch (err) {
+    // Logging optionnel - la commande peut échouer si Corosync n'est pas prêt
+    if (debugLog) {
+      debugLog(`[corosync] Failed to publish standby state: ${err}`);
+    }
+    return false;
+  }
+}
+
+/**
+ * Récupère les noms des nœuds marqués en standby via corosync-cmap
+ * 
+ * @returns Set des noms de nœuds en standby
+ */
+export function getStandbyNodes(): Set<string> {
+  const standbyNodes = new Set<string>();
+  try {
+    const output = execSync('corosync-cmapctl 2>/dev/null | grep "sfha.node.*standby"', {
+      encoding: 'utf-8',
+      timeout: 2000,
+    });
+    // Parse: "sfha.node.node1.standby (u8) = 1"
+    const regex = /sfha\.node\.([^.]+)\.standby.*=\s*1/g;
+    let match;
+    while ((match = regex.exec(output)) !== null) {
+      standbyNodes.add(match[1]);
+    }
+  } catch {
+    // Pas de clés standby ou erreur = aucun nœud en standby
+  }
+  return standbyNodes;
+}
+
+/**
+ * Nettoie l'état standby d'un nœud dans corosync-cmap
+ * Appelé quand un nœud sort du mode standby
+ * 
+ * @param nodeName Nom du nœud
+ * @returns true si le nettoyage a réussi
+ */
+export function clearStandbyState(nodeName: string): boolean {
+  try {
+    const key = `sfha.node.${nodeName}.standby`;
+    execSync(`corosync-cmapctl -D ${key} 2>/dev/null || true`, {
+      timeout: 2000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}

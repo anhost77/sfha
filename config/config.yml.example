@@ -1,175 +1,50 @@
-# Configuration sfha
-# Système de haute disponibilité léger pour Linux
-#
-# Ce fichier doit être copié vers /etc/sfha/config.yml
-# et adapté à votre environnement.
+# Configuration sfha - Exemple
+# Copiez ce fichier vers /etc/sfha/config.yml et adaptez-le
 
 cluster:
-  # Nom du cluster (informatif)
   name: mon-cluster
-  
-  # Exiger le quorum pour activer les ressources
-  # Recommandé: true pour éviter le split-brain
   quorum_required: true
-  
-  # Délai avant failover (ms)
-  # Permet d'éviter les basculements intempestifs
   failover_delay_ms: 3000
-  
-  # Intervalle de polling Corosync (ms)
-  poll_interval_ms: 5000
+  poll_interval_ms: 2000
 
-# Identité de ce nœud
-# Le nom DOIT correspondre à celui dans corosync.conf
 node:
-  name: ns1
-  # Priorité (non utilisé actuellement, réservé pour futur)
+  name: node1
   priority: 100
 
-# VIP flottantes
-# Ces adresses IP seront activées sur le nœud leader
 vips:
-  - name: vip-web
-    ip: 192.168.1.250
+  - name: vip-main
+    ip: 192.168.1.100
     cidr: 24
     interface: eth0
-  
-  # Exemple avec une deuxième VIP
-  # - name: vip-db
-  #   ip: 192.168.1.251
-  #   cidr: 24
-  #   interface: eth0
 
-# Services gérés
-# Ces services systemd seront démarrés/arrêtés avec le failover
 services:
   - name: nginx
     type: systemd
     unit: nginx
+    critical: true
+    restart_service: true
     healthcheck:
-      # Type: http, tcp, ou systemd
       type: http
-      # Cible du health check
-      # - http: URL complète
-      # - tcp: host:port
-      # - systemd: nom de l'unité
-      target: "http://127.0.0.1/health"
-      # Intervalle entre les checks (ms)
+      target: "http://127.0.0.1/"
       interval_ms: 5000
-      # Timeout par check (ms)
       timeout_ms: 2000
-      # Nombre d'échecs avant de marquer comme défaillant
       failures_before_unhealthy: 3
-      # Nombre de succès avant de marquer comme sain
       successes_before_healthy: 2
-  
-  # Exemple de service avec health check TCP
-  # - name: redis
-  #   type: systemd
-  #   unit: redis-server
-  #   healthcheck:
-  #     type: tcp
-  #     target: "127.0.0.1:6379"
-  #     interval_ms: 5000
-  #     timeout_ms: 1000
-  #     failures_before_unhealthy: 3
-  #     successes_before_healthy: 2
 
-# Contraintes
-# Définissent les relations entre les ressources
 constraints:
-  # Colocation: la ressource suit une autre
-  # nginx sera toujours sur le même nœud que vip-web
   - type: colocation
     resource: nginx
-    with: vip-web
-  
-  # Ordre: une ressource démarre avant une autre
-  # vip-web doit être active avant de démarrer nginx
+    with: vip-main
   - type: order
-    first: vip-web
+    first: vip-main
     then: nginx
 
-# ============================================
-# STONITH - Shoot The Other Node In The Head
-# ============================================
-# Permet d'éteindre un nœud défaillant via l'hyperviseur
-# pour éviter le split-brain et garantir l'intégrité des données.
-#
-# ATTENTION: Le fencing est une opération CRITIQUE.
-# Un mauvais paramétrage peut causer des arrêts intempestifs !
-
-stonith:
-  # Activer STONITH (recommandé en production)
-  enabled: false
-  
-  # Provider disponibles: proxmox
-  # D'autres providers pourront être ajoutés (vmware, ipmi, aws, etc.)
-  provider: proxmox
-  
-  # Configuration Proxmox VE
-  proxmox:
-    # URL de l'API Proxmox (avec port)
-    api_url: https://192.168.1.100:8006
-    
-    # Token API Proxmox
-    # Format: user@realm!tokenid
-    # Créer avec: pveum user token add root@pam sfha --privsep 0
-    token_id: root@pam!sfha
-    
-    # Secret du token - DEUX OPTIONS:
-    #
-    # Option 1 (recommandée): Fichier séparé avec permissions restrictives
-    # Le fichier ne doit contenir que le secret, sans retour à la ligne
-    # chmod 600 /etc/sfha/proxmox.secret
-    token_secret_file: /etc/sfha/proxmox.secret
-    
-    # Option 2: Directement dans ce fichier (moins secure)
-    # token_secret: votre-secret-ici
-    
-    # Vérifier le certificat SSL
-    # false pour les certificats auto-signés (défaut Proxmox)
-    verify_ssl: false
-    
-    # Nom du nœud Proxmox (l'hôte PVE, pas les guests)
-    # Visible dans l'interface Proxmox ou via: hostname
-    pve_node: pve
-  
-  # Mapping entre les nœuds sfha et les VM/CT Proxmox
-  # Le nom doit correspondre à node.name dans chaque config
-  nodes:
-    ns1:
-      type: lxc     # lxc (container) ou qemu (VM)
-      vmid: 210     # ID du container/VM dans Proxmox
-    ns2:
-      type: lxc
-      vmid: 211
-    ns3:
-      type: lxc
-      vmid: 212
-  
-  # Paramètres de sécurité (CRITIQUE)
-  # Ces valeurs par défaut sont conservatrices. Ajustez selon vos besoins.
-  safety:
-    # Exiger le quorum avant de fence
-    # FORTEMENT recommandé pour éviter le split-brain
-    require_quorum: true
-    
-    # Délai minimum entre deux fencing du même nœud (secondes)
-    # Évite les boucles de fence si un nœud redémarre mal
-    min_delay_between_fence: 60
-    
-    # Maximum de fencing en 5 minutes (storm detection)
-    # Si dépassé, le fencing automatique est bloqué
-    # Le fence manuel reste possible
-    max_fences_per_5min: 2
-    
-    # Période de grâce après démarrage sfha (secondes)
-    # Pendant ce temps, pas de fencing automatique
-    # Permet aux nœuds de se synchroniser au boot
-    startup_grace_period: 120
-
-# Logging
-logging:
-  # Niveau: debug, info, warn, error
-  level: info
+# stonith:
+#   enabled: true
+#   provider: proxmox
+#   proxmox:
+#     api_url: https://proxmox:8006
+#     token_id: root@pam!sfha
+#     token_secret: your-token-secret
+#     verify_ssl: false
+#     pve_node: pve01
