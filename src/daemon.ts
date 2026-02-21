@@ -5,7 +5,7 @@
 
 import { EventEmitter } from 'events';
 import { SfhaConfig, loadConfig } from './config.js';
-import { CorosyncWatcher, CorosyncState, isCorosyncRunning, getQuorumStatus, getClusterNodes, publishStandbyState, clearStandbyState } from './corosync.js';
+import { CorosyncWatcher, CorosyncState, isCorosyncRunning, getQuorumStatus, getClusterNodes, getLocalNodeId, publishStandbyState, clearStandbyState } from './corosync.js';
 import { activateAllVips, deactivateAllVips, getVipsState, isAnyVipReachable, VipState } from './vip.js';
 import { HealthManager, HealthResult } from './health.js';
 import { ResourceManager, ResourceState, restartService, isServiceActive } from './resources.js';
@@ -20,6 +20,14 @@ import { writeFileSync, unlinkSync, existsSync } from 'fs';
 // Types
 // ============================================
 
+export interface ClusterNode {
+  name: string;
+  ip: string;
+  online: boolean;
+  isLeader: boolean;
+  isLocal: boolean;
+}
+
 export interface DaemonStatus {
   version: string;
   running: boolean;
@@ -32,6 +40,7 @@ export interface DaemonStatus {
     nodesOnline: number;
     nodesTotal: number;
   };
+  nodes: ClusterNode[];
   vips: VipState[];
   services: ResourceState[];
   health: Record<string, HealthResult>;
@@ -57,7 +66,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.4';
+const VERSION = '1.0.5';
 
 // ============================================
 // Daemon
@@ -1139,18 +1148,29 @@ export class SfhaDaemon extends EventEmitter {
       healthData[key] = value;
     }
     
+    const leaderName = this.electionManager?.getState().leaderName ?? null;
+    const localNodeName = this.config?.node.name || '';
+    const localNodeId = getLocalNodeId();
+    
     return {
       version: VERSION,
       running: this.running,
       isLeader: this.isLeader,
       standby: this.standby,
-      leaderName: this.electionManager?.getState().leaderName ?? null,
+      leaderName,
       corosync: {
         running: isCorosyncRunning(),
         quorate: quorum.quorate,
         nodesOnline: nodes.filter((n) => n.online).length,
         nodesTotal: nodes.length,
       },
+      nodes: nodes.map((n) => ({
+        name: n.name,
+        ip: n.ip,
+        online: n.online,
+        isLeader: n.name === leaderName,
+        isLocal: n.nodeId === localNodeId,
+      })),
       vips: this.config ? getVipsState(this.config.vips) : [],
       services: this.resourceManager?.getState() || [],
       health: healthData,
@@ -1161,7 +1181,7 @@ export class SfhaDaemon extends EventEmitter {
       },
       config: {
         clusterName: this.config?.cluster.name || '',
-        nodeName: this.config?.node.name || '',
+        nodeName: localNodeName,
       },
     };
   }
