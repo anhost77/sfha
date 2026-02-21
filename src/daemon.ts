@@ -241,9 +241,12 @@ export class SfhaDaemon extends EventEmitter {
     }
     
     // Initialiser le P2P state manager pour la coordination entre nœuds
+    // Récupérer l'IP mesh (wg1) pour binder le serveur HTTP de façon sécurisée
+    const meshIp = this.getMeshBindAddress();
     this.p2pStateManager = initP2PStateManager({
       port: 7777,
       pollIntervalMs: this.config!.cluster.pollIntervalMs || 5000,
+      bindAddress: meshIp,
     });
     this.p2pStateManager.start(this.config!.node.name);
     this.p2pStateManager.onStateChange(() => {
@@ -1284,6 +1287,43 @@ export class SfhaDaemon extends EventEmitter {
     } catch {
       // Ignorer
     }
+  }
+
+  /**
+   * Récupère l'IP de l'interface mesh (wg1) pour le binding P2P sécurisé
+   * Fallback sur localhost si pas de mesh
+   */
+  private getMeshBindAddress(): string {
+    try {
+      const { execSync } = require('child_process');
+      // Récupérer l'IP de wg1 (interface WireGuard mesh)
+      const result = execSync("ip -4 addr show wg1 2>/dev/null | grep -oP 'inet \\K[0-9.]+'", {
+        encoding: 'utf8',
+        timeout: 5000,
+      }).trim();
+      if (result) {
+        logger.info(`P2P: utilisation de l'IP mesh ${result}`);
+        return result;
+      }
+    } catch {
+      // Pas d'interface wg1
+    }
+    
+    // Fallback: utiliser l'IP Corosync du nœud local
+    try {
+      const nodes = getClusterNodes();
+      const localNodeId = getLocalNodeId();
+      const localNode = nodes.find(n => n.nodeId === localNodeId);
+      if (localNode?.ip) {
+        logger.info(`P2P: utilisation de l'IP Corosync ${localNode.ip}`);
+        return localNode.ip;
+      }
+    } catch {
+      // Ignorer
+    }
+    
+    logger.warn('P2P: pas d\'IP mesh trouvée, écoute sur localhost uniquement');
+    return '127.0.0.1';
   }
 
   /**

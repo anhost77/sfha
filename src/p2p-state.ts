@@ -26,6 +26,7 @@ export interface NodeState {
 export interface P2PStateConfig {
   port: number;
   pollIntervalMs: number;
+  bindAddress?: string; // IP sur laquelle binder (défaut: 127.0.0.1 pour sécurité)
 }
 
 // ============================================
@@ -64,6 +65,7 @@ export class P2PStateManager {
     this.config = {
       port: config?.port ?? DEFAULT_PORT,
       pollIntervalMs: config?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL,
+      bindAddress: config?.bindAddress ?? '127.0.0.1', // Sécurité: localhost par défaut
     };
   }
 
@@ -167,7 +169,9 @@ export class P2PStateManager {
       }
     });
     
-    this.server.listen(this.config.port, '0.0.0.0');
+    const bindAddr = this.config.bindAddress || '127.0.0.1';
+    this.server.listen(this.config.port, bindAddr);
+    logger.info(`P2P State: écoute sur ${bindAddr}:${this.config.port}`);
   }
 
   /**
