@@ -118,7 +118,7 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
       colorize(t('status.inactive'), 'red');
     const localRole = election?.isLocalLeader ? 
       colorize(t('status.leader'), 'green') : 
-      colorize(t('status.standby'), 'yellow');
+      colorize('follower', 'gray');
     const quorumStatus = corosync.quorum.quorate ? 
       colorize(t('status.quorumOk'), 'green') : 
       colorize(t('status.noQuorum'), 'red');
@@ -175,11 +175,12 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
 function displayDaemonStatus(data: any): void {
   const version = data.version || getVersion();
   const daemonStatus = colorize('✓ daemon actif', 'green');
+  // Leader = vert, standby explicite = jaune, follower = gris
   const state = data.isLeader ? 
     colorize(t('status.leader'), 'green') : 
     data.standby ?
       colorize('standby', 'yellow') :
-      colorize(t('status.standby'), 'gray');
+      colorize('follower', 'gray');
   const quorumStatus = data.corosync.quorate ? 
     colorize(t('status.quorumOk'), 'green') : 
     colorize(t('status.noQuorum'), 'red');
