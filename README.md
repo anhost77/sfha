@@ -55,17 +55,17 @@ sfha --version
 - **OS** : Debian 11/12/13, Ubuntu 22.04/24.04
 - **Node.js** : ❌ **Non requis** (embarqué dans le .deb)
 - **Corosync** : Installé automatiquement comme dépendance
-- **WireGuard** : `apt install wireguard-tools` (optionnel, pour le mesh)
+- **WireGuard** : `apt install wireguard-tools` (**obligatoire** pour le mesh P2P)
 
 ### Ports réseau requis
 
 | Port | Protocole | Usage |
 |------|-----------|-------|
 | 5405 | UDP | Corosync (communication cluster) |
-| 51820 | UDP | WireGuard mesh (si activé) |
-| **7777** | TCP | **Coordination P2P sfha** (interne, sur IP mesh uniquement) |
+| 51820 | UDP | WireGuard mesh |
+| **7777** | TCP | **Coordination P2P sfha** (sur IP mesh uniquement) |
 
-> ⚠️ Le port **7777** doit rester disponible sur chaque nœud. Il est utilisé pour la synchronisation de l'état standby entre les nœuds du cluster. Ce port n'écoute que sur l'interface mesh WireGuard (10.x.x.x) et n'est pas exposé sur les interfaces publiques.
+> ⚠️ **WireGuard est obligatoire.** Le port 7777 est utilisé pour la synchronisation de l'état entre nœuds et n'écoute que sur l'interface mesh WireGuard (10.x.x.x) pour des raisons de sécurité.
 
 ---
 
