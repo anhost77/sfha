@@ -1524,14 +1524,42 @@ async function initCommand(options: {
     console.log(`  sfha join ${result.token}`);
     console.log('');
     
-    if (stonithConfig) {
-      console.log(colorize('Configuration STONITH à ajouter:', 'blue'));
-      console.log('');
-      console.log(stonithConfig);
-      console.log('');
+    // Créer automatiquement le config.yml
+    const configPath = '/etc/sfha/config.yml';
+    if (!existsSync(configPath)) {
+      let configContent = `# Configuration sfha - générée par sfha init
+cluster:
+  name: ${options.name}
+  quorum_required: true
+  failover_delay_ms: 3000
+  poll_interval_ms: 2000
+
+node:
+  name: node1
+  priority: 100
+
+vips: []
+services: []
+`;
+      
+      // Ajouter STONITH si configuré
+      if (stonithConfig) {
+        configContent += '\n' + stonithConfig;
+      }
+      
+      writeFileSync(configPath, configContent);
+      console.log(colorize('✓', 'green'), 'Configuration créée:', configPath);
     }
     
-    console.log(colorize('Note:', 'yellow'), 'Configurez /etc/sfha/config.yml puis démarrez sfha.');
+    // Démarrer le daemon automatiquement
+    try {
+      execSync('systemctl enable sfha 2>/dev/null || true', { encoding: 'utf-8' });
+      execSync('systemctl start sfha', { encoding: 'utf-8' });
+      console.log(colorize('✓', 'green'), 'Daemon sfha démarré');
+    } catch (e: any) {
+      console.log(colorize('⚠', 'yellow'), 'Impossible de démarrer sfha automatiquement:', e.message);
+      console.log('  Démarrez manuellement avec: systemctl start sfha');
+    }
   } else {
     // Initialisation sans mesh (juste créer la config)
     console.log(colorize('✓', 'green'), `Cluster "${options.name}" initialisé.`);
@@ -1731,17 +1759,46 @@ async function joinCommand(token: string, options: { endpoint?: string; ip?: str
   }
 
   console.log(colorize('✓', 'green'), result.message);
-  console.log('');
-  console.log(colorize('Prochaines étapes:', 'blue'));
-  console.log('  1. Configurez /etc/sfha/config.yml (copiez du premier nœud)');
-  console.log('  2. Sur le premier nœud, ajoutez ce peer:');
   
+  // Créer automatiquement le config.yml
+  const configPath = '/etc/sfha/config.yml';
   const meshConfig = mesh.getConfig();
-  if (meshConfig) {
-    console.log(`     sfha mesh add-peer --name <nom> --pubkey ${meshConfig.publicKey} --endpoint <votre-ip>:${meshConfig.listenPort} --mesh-ip ${meshConfig.meshIp.split('/')[0]}`);
+  
+  if (!existsSync(configPath) && meshConfig) {
+    // Déterminer le numéro de nœud basé sur les peers existants
+    const peerCount = meshConfig.peers?.length || 0;
+    const nodeNumber = peerCount + 2; // +2 car node1 est l'initiateur et on commence à compter après
+    const nodeName = `node${nodeNumber}`;
+    
+    const configContent = `# Configuration sfha - générée par sfha join
+cluster:
+  name: ${meshConfig.clusterName}
+  quorum_required: true
+  failover_delay_ms: 3000
+  poll_interval_ms: 2000
+
+node:
+  name: ${nodeName}
+  priority: ${100 - (nodeNumber - 1) * 10}
+
+vips: []
+services: []
+`;
+    
+    writeFileSync(configPath, configContent);
+    console.log(colorize('✓', 'green'), 'Configuration créée:', configPath);
+    console.log(colorize('ℹ', 'blue'), `Nœud configuré comme: ${nodeName}`);
   }
   
-  console.log('  3. Démarrez sfha sur ce nœud');
+  // Démarrer le daemon automatiquement
+  try {
+    execSync('systemctl enable sfha 2>/dev/null || true', { encoding: 'utf-8' });
+    execSync('systemctl start sfha', { encoding: 'utf-8' });
+    console.log(colorize('✓', 'green'), 'Daemon sfha démarré');
+  } catch (e: any) {
+    console.log(colorize('⚠', 'yellow'), 'Impossible de démarrer sfha automatiquement:', e.message);
+    console.log('  Démarrez manuellement avec: systemctl start sfha');
+  }
 }
 
 // ============================================
