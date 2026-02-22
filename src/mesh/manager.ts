@@ -52,7 +52,8 @@ import {
   disableWgQuickService,
   detectPublicEndpoint,
 } from './wireguard.js';
-import { updateCorosyncForMesh, addNodeToCorosync, removeNodeFromCorosync, reloadCorosync, getNextNodeId } from './corosync-mesh.js';
+import { updateCorosyncForMesh, addNodeToCorosync, removeNodeFromCorosync, reloadCorosync, getNextNodeId, getCorosyncNodes } from './corosync-mesh.js';
+import { fetchCorosyncNodesFromPeer } from '../p2p-state.js';
 
 const MESH_CONFIG_PATH = '/etc/sfha/mesh.json';
 const WG_KEYS_DIR = '/etc/sfha/wireguard';
@@ -400,37 +401,92 @@ export class MeshManager {
     saveWgQuickConfig(WG_INTERFACE, wgConfig);
     enableWgQuickService(WG_INTERFACE);
 
-    // ===== Générer la config Corosync avec tous les nœuds =====
-    const corosyncNodes: { name: string; ip: string; nodeId: number }[] = [];
-    let nodeId = 1;
+    // ===== Notifier les peers existants pour qu'ils nous ajoutent =====
+    // Protocole sécurisé :
+    // 1. Envoyer un "knock" UDP sur le port 51820 avec l'authKey
+    // 2. Le daemon distant ouvre temporairement le port 7777
+    // 3. Appeler l'API /add-peer sur le port 7777
+    const notifyResults: string[] = [];
+    const localNodeName = getHostname(); // Utilise le hostname de la machine
+    const myPeerInfo = {
+      name: localNodeName,
+      publicKey: keys.publicKey,
+      endpoint,
+      meshIp: extractMeshIp(meshIp),
+      authKey: token.authkey, // Requis pour l'authentification
+    };
 
-    // Ajouter l'initiateur comme premier nœud
-    corosyncNodes.push({
-      name: token.initiatorName || 'node1',
-      ip: token.meshIp,
-      nodeId: nodeId++,
-    });
-
-    // Ajouter tous les autres peers existants
-    if (token.peers && token.peers.length > 0) {
-      for (const p of token.peers) {
-        if (p.pubkey !== token.pubkey) {
-          corosyncNodes.push({
-            name: p.name,
-            ip: p.meshIp,
-            nodeId: nodeId++,
-          });
-        }
+    // Notifier l'initiateur d'abord
+    const initiatorEndpoint = token.endpoint.split(':')[0];
+    let initiatorNotified = false;
+    try {
+      // Étape 1: Knock pour ouvrir le port
+      await sendKnock(initiatorEndpoint, token.authkey);
+      // Attendre un peu que le firewall s'ouvre
+      await new Promise(resolve => setTimeout(resolve, 500));
+      // Étape 2: Appeler l'API
+      const initiatorResult = await this.notifyPeerViaApi(initiatorEndpoint, myPeerInfo);
+      if (initiatorResult.success) {
+        notifyResults.push(`✓ Initiateur notifié`);
+        initiatorNotified = true;
+      } else {
+        notifyResults.push(`⚠ Initiateur: ${initiatorResult.error}`);
       }
+    } catch (err: any) {
+      notifyResults.push(`⚠ Initiateur: ${err.message}`);
     }
 
-    // Ajouter ce nœud (le nouveau joiner)
-    const localNodeName = getHostname(); // Utilise le hostname de la machine
-    corosyncNodes.push({
-      name: localNodeName,
-      ip: extractMeshIp(meshIp),
-      nodeId: nodeId,
-    });
+    // ===== Récupérer la config Corosync complète depuis l'initiateur =====
+    // L'initiateur a maintenant notre nœud dans sa config, donc il nous retournera
+    // la liste complète de tous les nœuds du cluster
+    let corosyncNodes: { name: string; ip: string; nodeId: number }[] = [];
+    
+    if (initiatorNotified) {
+      // Attendre que l'initiateur ait synchronisé les autres nœuds
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      try {
+        const corosyncResult = await fetchCorosyncNodesFromPeer(initiatorEndpoint, token.authkey);
+        if (corosyncResult.success && corosyncResult.nodes && corosyncResult.nodes.length > 0) {
+          corosyncNodes = corosyncResult.nodes;
+          notifyResults.push(`✓ Config Corosync synchronisée (${corosyncNodes.length} nœuds)`);
+        }
+      } catch (err: any) {
+        // On ne fait rien, on va générer une config partielle
+      }
+    }
+    
+    // Si on n'a pas pu récupérer la config depuis l'initiateur, générer une config partielle
+    if (corosyncNodes.length === 0) {
+      let nodeId = 1;
+
+      // Ajouter l'initiateur comme premier nœud
+      corosyncNodes.push({
+        name: token.initiatorName || 'node1',
+        ip: token.meshIp,
+        nodeId: nodeId++,
+      });
+
+      // Ajouter tous les autres peers existants
+      if (token.peers && token.peers.length > 0) {
+        for (const p of token.peers) {
+          if (p.pubkey !== token.pubkey) {
+            corosyncNodes.push({
+              name: p.name,
+              ip: p.meshIp,
+              nodeId: nodeId++,
+            });
+          }
+        }
+      }
+
+      // Ajouter ce nœud (le nouveau joiner)
+      corosyncNodes.push({
+        name: localNodeName,
+        ip: extractMeshIp(meshIp),
+        nodeId: nodeId,
+      });
+    }
 
     // Écrire la config Corosync
     updateCorosyncForMesh(token.cluster, corosyncNodes, token.corosyncPort);
@@ -441,38 +497,6 @@ export class MeshManager {
       execSync('systemctl start corosync', { stdio: 'pipe' });
     } catch {
       // Corosync sera démarré manuellement
-    }
-
-    // ===== Notifier les peers existants pour qu'ils nous ajoutent =====
-    // Protocole sécurisé :
-    // 1. Envoyer un "knock" UDP sur le port 51820 avec l'authKey
-    // 2. Le daemon distant ouvre temporairement le port 7777
-    // 3. Appeler l'API /add-peer sur le port 7777
-    const notifyResults: string[] = [];
-    const myPeerInfo = {
-      name: localNodeName,
-      publicKey: keys.publicKey,
-      endpoint,
-      meshIp: extractMeshIp(meshIp),
-      authKey: token.authkey, // Requis pour l'authentification
-    };
-
-    // Notifier l'initiateur
-    const initiatorEndpoint = token.endpoint.split(':')[0];
-    try {
-      // Étape 1: Knock pour ouvrir le port
-      await sendKnock(initiatorEndpoint, token.authkey);
-      // Attendre un peu que le firewall s'ouvre
-      await new Promise(resolve => setTimeout(resolve, 500));
-      // Étape 2: Appeler l'API
-      const initiatorResult = await this.notifyPeerViaApi(initiatorEndpoint, myPeerInfo);
-      if (initiatorResult.success) {
-        notifyResults.push(`✓ Initiateur notifié`);
-      } else {
-        notifyResults.push(`⚠ Initiateur: ${initiatorResult.error}`);
-      }
-    } catch (err: any) {
-      notifyResults.push(`⚠ Initiateur: ${err.message}`);
     }
 
     // Notifier les autres peers existants

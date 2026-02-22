@@ -280,3 +280,37 @@ export function isCorosyncInstalled(): boolean {
     return false;
   }
 }
+
+/**
+ * Récupère la liste complète des nœuds depuis corosync.conf
+ */
+export function getCorosyncNodes(): MeshNode[] {
+  if (!existsSync(COROSYNC_CONF_PATH)) {
+    return [];
+  }
+
+  const content = readFileSync(COROSYNC_CONF_PATH, 'utf-8');
+  const nodes: MeshNode[] = [];
+  
+  // Parser la nodelist avec une approche simple
+  const nodeBlocks = content.match(/node\s*\{[^}]+\}/g) || [];
+  
+  for (const block of nodeBlocks) {
+    const ipMatch = block.match(/ring0_addr:\s*(\S+)/);
+    const nameMatch = block.match(/name:\s*(\S+)/);
+    const nodeIdMatch = block.match(/nodeid:\s*(\d+)/);
+    
+    if (ipMatch && nameMatch && nodeIdMatch) {
+      nodes.push({
+        name: nameMatch[1],
+        ip: ipMatch[1],
+        nodeId: parseInt(nodeIdMatch[1], 10),
+      });
+    }
+  }
+  
+  // Trier par nodeId pour cohérence
+  nodes.sort((a, b) => a.nodeId - b.nodeId);
+  
+  return nodes;
+}
