@@ -193,7 +193,7 @@ export class MeshManager {
     // Mettre à jour Corosync
     updateCorosyncForMesh(options.clusterName, [
       {
-        name: 'node1', // Sera mis à jour par la config principale
+        name: getHostname(), // Utilise le hostname de la machine
         ip: extractMeshIp(meshIp),
         nodeId: 1,
       },
@@ -425,7 +425,7 @@ export class MeshManager {
     }
 
     // Ajouter ce nœud (le nouveau joiner)
-    const localNodeName = `node${nodeId}`; // TODO: permettre de spécifier le nom
+    const localNodeName = getHostname(); // Utilise le hostname de la machine
     corosyncNodes.push({
       name: localNodeName,
       ip: extractMeshIp(meshIp),
@@ -596,7 +596,7 @@ export class MeshManager {
       assignedIp: ipToAssign, // IP pré-assignée pour le nouveau nœud
       usedIps, // Liste complète des IPs utilisées
       peers, // Liste des peers existants
-      initiatorName: 'node1', // TODO: récupérer le vrai nom du nœud depuis config.yml
+      initiatorName: getHostname(), // Utilise le hostname de la machine
     });
 
     return {

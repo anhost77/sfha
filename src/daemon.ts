@@ -206,6 +206,37 @@ export class SfhaDaemon extends EventEmitter {
     );
     this.controlServer.start();
     
+    // ===== IMPORTANT: Démarrer P2P AVANT d'attendre le quorum =====
+    // Le serveur P2P permet aux nœuds de se synchroniser et de propager les peers.
+    // Sans lui, les nouveaux nœuds ne peuvent pas recevoir les propagations.
+    const meshManager = getMeshManager();
+    const meshConfig = meshManager.getConfig();
+    if (meshConfig?.meshNetwork) {
+      // Autoriser les IPs des peers existants
+      for (const peer of meshConfig.peers || []) {
+        if (peer.endpoint) {
+          const peerIp = peer.endpoint.split(':')[0];
+          authorizePermanently(peerIp);
+        }
+      }
+      // Démarrer le serveur de knock pour accepter les nouveaux nœuds
+      startKnockServer();
+    }
+    
+    // Initialiser le P2P state manager pour la coordination entre nœuds
+    const meshIp = this.getMeshBindAddress();
+    this.p2pStateManager = initP2PStateManager({
+      port: 7777,
+      pollIntervalMs: this.config!.cluster.pollIntervalMs || 5000,
+      bindAddress: meshIp,
+    });
+    this.p2pStateManager.start(this.config!.node.name);
+    this.p2pStateManager.onStateChange(() => {
+      // Quand un état distant change, re-vérifier l'élection
+      logger.debug('P2P: État distant changé, re-élection...');
+      this.checkElection();
+    });
+    
     // Attendre le quorum si requis
     if (this.config!.cluster.quorumRequired) {
       await this.waitForQuorum();
@@ -240,35 +271,6 @@ export class SfhaDaemon extends EventEmitter {
         }
       }
     }
-    
-    // Démarrer le serveur de knock et autoriser les peers existants
-    const meshManager = getMeshManager();
-    const meshConfig = meshManager.getConfig();
-    if (meshConfig?.meshNetwork) {
-      // Autoriser les IPs des peers existants
-      for (const peer of meshConfig.peers || []) {
-        if (peer.endpoint) {
-          const peerIp = peer.endpoint.split(':')[0];
-          authorizePermanently(peerIp);
-        }
-      }
-      // Démarrer le serveur de knock pour accepter les nouveaux nœuds
-      startKnockServer();
-    }
-    
-    // Initialiser le P2P state manager pour la coordination entre nœuds
-    const meshIp = this.getMeshBindAddress();
-    this.p2pStateManager = initP2PStateManager({
-      port: 7777,
-      pollIntervalMs: this.config!.cluster.pollIntervalMs || 5000,
-      bindAddress: meshIp,
-    });
-    this.p2pStateManager.start(this.config!.node.name);
-    this.p2pStateManager.onStateChange(() => {
-      // Quand un état distant change, re-vérifier l'élection
-      logger.debug('P2P: État distant changé, re-élection...');
-      this.checkElection();
-    });
     
     // Configurer les callbacks
     this.electionManager.onLeaderChange((isLeader, leaderName) => {

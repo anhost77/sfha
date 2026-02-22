@@ -32,6 +32,10 @@ export function isIpAuthorized(ip: string): boolean {
   // Localhost toujours OK
   if (ip === '127.0.0.1' || ip === '::1') return true;
   
+  // IPs privées (LAN) toujours OK pour permettre le join initial
+  // Les appels API sont protégés par l'authKey dans le body, pas par l'IP
+  if (ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.')) return true;
+  
   // IPs permanentes (mesh, peers)
   if (permanentIps.has(ip)) return true;
   

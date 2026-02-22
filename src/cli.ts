@@ -18,6 +18,7 @@ import { logger } from './utils/logger.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { hostname } from 'os';
 import * as readline from 'readline';
 import { execSync, spawn } from 'child_process';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -26,7 +27,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.17';
+const VERSION = '1.0.27';
 
 function getVersion(): string {
   return VERSION;
@@ -1765,10 +1766,10 @@ async function joinCommand(token: string, options: { endpoint?: string; ip?: str
   const meshConfig = mesh.getConfig();
   
   if (!existsSync(configPath) && meshConfig) {
-    // Déterminer le numéro de nœud basé sur les peers existants
+    // Utiliser le hostname de la machine comme nom de nœud
+    const nodeName = hostname();
     const peerCount = meshConfig.peers?.length || 0;
-    const nodeNumber = peerCount + 2; // +2 car node1 est l'initiateur et on commence à compter après
-    const nodeName = `node${nodeNumber}`;
+    const priority = 100 - peerCount * 10; // Priorité décroissante selon l'ordre d'arrivée
     
     const configContent = `# Configuration sfha - générée par sfha join
 cluster:
@@ -1779,7 +1780,7 @@ cluster:
 
 node:
   name: ${nodeName}
-  priority: ${100 - (nodeNumber - 1) * 10}
+  priority: ${priority}
 
 vips: []
 services: []
