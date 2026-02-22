@@ -249,11 +249,24 @@ export function wgQuickDown(interfaceName: string): void {
  * Récupère l'IP publique/externe du serveur
  */
 export function detectPublicEndpoint(port: number): string | null {
-  // Essayer différentes méthodes
+  // D'abord essayer l'IP locale (plus fiable pour les clusters LAN)
+  try {
+    const output = execSync(
+      "ip -4 route get 1 | head -1 | awk '{print $7}'",
+      { encoding: 'utf-8', shell: '/bin/bash' }
+    ).trim();
+    if (output && output !== '' && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(output)) {
+      return `${output}:${port}`;
+    }
+  } catch {
+    // Ignorer
+  }
+
+  // Fallback: IP publique via services externes
   const methods = [
-    'curl -4 -s --connect-timeout 5 ifconfig.me',
-    'curl -4 -s --connect-timeout 5 icanhazip.com',
-    'curl -4 -s --connect-timeout 5 api.ipify.org',
+    'curl -4 -s --connect-timeout 3 ifconfig.me',
+    'curl -4 -s --connect-timeout 3 icanhazip.com',
+    'curl -4 -s --connect-timeout 3 api.ipify.org',
   ];
 
   for (const cmd of methods) {
@@ -265,19 +278,6 @@ export function detectPublicEndpoint(port: number): string | null {
     } catch {
       continue;
     }
-  }
-
-  // Fallback: IP locale principale
-  try {
-    const output = execSync(
-      "ip -4 route get 1 | head -1 | awk '{print $7}'",
-      { encoding: 'utf-8', shell: '/bin/bash' }
-    ).trim();
-    if (output && output !== '') {
-      return `${output}:${port}`;
-    }
-  } catch {
-    // Ignorer
   }
 
   return null;

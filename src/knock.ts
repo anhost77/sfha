@@ -14,7 +14,7 @@ import { logger } from './utils/logger.js';
 import { getMeshManager } from './mesh/manager.js';
 
 const KNOCK_PREFIX = 'SFHA_KNOCK:';
-const KNOCK_PORT = 51820;
+const KNOCK_PORT = 51821; // Port différent de WireGuard (51820)
 const KNOCK_TIMEOUT_MS = 30000; // 30 secondes
 
 let knockServer: Socket | null = null;

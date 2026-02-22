@@ -222,11 +222,13 @@ export class P2PStateManager {
             }
             
             // Add the peer using MeshManager
+            // Nettoyer le meshIp au cas où il contient déjà un CIDR
+            const cleanMeshIp = peerData.meshIp.split('/')[0];
             const result = mesh.addPeer({
               name: peerData.name,
               publicKey: peerData.publicKey,
               endpoint: peerData.endpoint,
-              allowedIps: `${peerData.meshIp}/32`,
+              allowedIps: `${cleanMeshIp}/32`,
             });
             
             if (result.success) {
