@@ -26,7 +26,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.9';
+const VERSION = '1.0.14';
 
 function getVersion(): string {
   return VERSION;
