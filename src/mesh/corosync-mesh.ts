@@ -117,54 +117,63 @@ export function addNodeToCorosync(node: MeshNode): void {
     throw new Error('Configuration Corosync introuvable');
   }
 
-  const content = readFileSync(COROSYNC_CONF_PATH, 'utf-8');
-
-  // Trouver la dernière accolade fermante de nodelist
-  const nodelistEndIndex = content.lastIndexOf('}', content.indexOf('nodelist {') + content.length);
-
-  // Trouver la position juste avant la dernière accolade de nodelist
-  const insertPosition = content.lastIndexOf('}', nodelistEndIndex - 1);
-
-  const newNodeBlock = `
-    node {
-        ring0_addr: ${node.ip}
-        name: ${node.name}
-        nodeid: ${node.nodeId}
-    }
-`;
-
-  // Parser manuellement pour insérer le nouveau nœud
+  let content = readFileSync(COROSYNC_CONF_PATH, 'utf-8');
+  
+  // Compter le nombre de nœuds existants
+  const existingNodes = (content.match(/ring0_addr:/g) || []).length;
+  const newTotalNodes = existingNodes + 1;
+  
+  // Pour 2 nœuds, ajouter two_node: 1 dans la section quorum si pas déjà présent
+  if (newTotalNodes === 2 && !content.includes('two_node:')) {
+    content = content.replace(
+      /quorum\s*\{([^}]*provider:\s*corosync_votequorum)/,
+      'quorum {\n    two_node: 1\n$1'
+    );
+  }
+  
+  // Pour >2 nœuds, retirer two_node si présent
+  if (newTotalNodes > 2 && content.includes('two_node:')) {
+    content = content.replace(/\s*two_node:\s*1\n?/g, '\n');
+  }
+  
   const lines = content.split('\n');
   const newLines: string[] = [];
+  
   let inNodelist = false;
-  let nodelistBraces = 0;
+  let braceDepth = 0;
   let inserted = false;
 
-  for (const line of lines) {
-    if (line.includes('nodelist {')) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    
+    // Détecter l'entrée dans nodelist
+    if (trimmed === 'nodelist {' || trimmed.startsWith('nodelist {')) {
       inNodelist = true;
-      nodelistBraces = 1;
+      braceDepth = 1;
+      newLines.push(line);
+      continue;
     }
-
+    
     if (inNodelist) {
-      if (line.includes('{')) {
-        nodelistBraces += (line.match(/{/g) || []).length;
+      // Compter les accolades
+      for (const char of line) {
+        if (char === '{') braceDepth++;
+        if (char === '}') braceDepth--;
       }
-      if (line.includes('}')) {
-        nodelistBraces -= (line.match(/}/g) || []).length;
-        if (nodelistBraces === 0 && !inserted) {
-          // Insérer le nouveau nœud avant la dernière accolade
-          newLines.push(`    node {`);
-          newLines.push(`        ring0_addr: ${node.ip}`);
-          newLines.push(`        name: ${node.name}`);
-          newLines.push(`        nodeid: ${node.nodeId}`);
-          newLines.push(`    }`);
-          inserted = true;
-          inNodelist = false;
-        }
+      
+      // Si on sort de nodelist (braceDepth == 0), insérer le nouveau nœud AVANT cette ligne
+      if (braceDepth === 0 && !inserted) {
+        newLines.push(`    node {`);
+        newLines.push(`        ring0_addr: ${node.ip}`);
+        newLines.push(`        name: ${node.name}`);
+        newLines.push(`        nodeid: ${node.nodeId}`);
+        newLines.push(`    }`);
+        inserted = true;
+        inNodelist = false;
       }
     }
-
+    
     newLines.push(line);
   }
 

@@ -5,6 +5,10 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
+import { hostname as getHostname } from 'os';
+import { execSync } from 'child_process';
+import http from 'http';
+import { sendKnock } from '../knock.js';
 import {
   MeshConfig,
   MeshPeer,
@@ -277,7 +281,6 @@ export class MeshManager {
       
       // Générer une IP unique en essayant plusieurs fois si nécessaire
       // On utilise un hash du hostname + timestamp pour départager les nœuds simultanés
-      const { hostname: getHostname } = await import('os');
       const hostname = getHostname();
       const uniqueSeed = Date.now() % 1000 + hostname.split('').reduce((a: number, c: string) => a + c.charCodeAt(0), 0);
       
@@ -434,17 +437,116 @@ export class MeshManager {
 
     // Démarrer Corosync automatiquement
     try {
-      const { execSync } = await import('child_process');
       execSync('systemctl enable corosync', { stdio: 'pipe' });
       execSync('systemctl start corosync', { stdio: 'pipe' });
     } catch {
       // Corosync sera démarré manuellement
     }
 
+    // ===== Notifier les peers existants pour qu'ils nous ajoutent =====
+    // Protocole sécurisé :
+    // 1. Envoyer un "knock" UDP sur le port 51820 avec l'authKey
+    // 2. Le daemon distant ouvre temporairement le port 7777
+    // 3. Appeler l'API /add-peer sur le port 7777
+    const notifyResults: string[] = [];
+    const myPeerInfo = {
+      name: localNodeName,
+      publicKey: keys.publicKey,
+      endpoint,
+      meshIp: extractMeshIp(meshIp),
+      authKey: token.authkey, // Requis pour l'authentification
+    };
+
+    // Notifier l'initiateur
+    const initiatorEndpoint = token.endpoint.split(':')[0];
+    try {
+      // Étape 1: Knock pour ouvrir le port
+      await sendKnock(initiatorEndpoint, token.authkey);
+      // Attendre un peu que le firewall s'ouvre
+      await new Promise(resolve => setTimeout(resolve, 500));
+      // Étape 2: Appeler l'API
+      const initiatorResult = await this.notifyPeerViaApi(initiatorEndpoint, myPeerInfo);
+      if (initiatorResult.success) {
+        notifyResults.push(`✓ Initiateur notifié`);
+      } else {
+        notifyResults.push(`⚠ Initiateur: ${initiatorResult.error}`);
+      }
+    } catch (err: any) {
+      notifyResults.push(`⚠ Initiateur: ${err.message}`);
+    }
+
+    // Notifier les autres peers existants
+    if (token.peers && token.peers.length > 0) {
+      for (const p of token.peers) {
+        if (p.pubkey !== token.pubkey && p.endpoint) {
+          const peerEndpoint = p.endpoint.split(':')[0];
+          try {
+            await sendKnock(peerEndpoint, token.authkey);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            const result = await this.notifyPeerViaApi(peerEndpoint, myPeerInfo);
+            if (result.success) {
+              notifyResults.push(`✓ ${p.name} notifié`);
+            } else {
+              notifyResults.push(`⚠ ${p.name}: ${result.error}`);
+            }
+          } catch (err: any) {
+            notifyResults.push(`⚠ ${p.name}: ${err.message}`);
+          }
+        }
+      }
+    }
+
+    const notifyLog = notifyResults.length > 0 ? `\nNotifications: ${notifyResults.join(', ')}` : '';
+
     return {
       success: true,
-      message: `Rejoint le cluster "${token.cluster}" avec l'IP mesh ${meshIp}. ${allPeers.length} peer(s) configuré(s).`,
+      message: `Rejoint le cluster "${token.cluster}" avec l'IP mesh ${meshIp}. ${allPeers.length} peer(s) configuré(s).${notifyLog}`,
     };
+  }
+
+  /**
+   * Notifie un peer existant via l'API P2P (port 7777) pour qu'il nous ajoute
+   */
+  private notifyPeerViaApi(peerMeshIp: string, myInfo: { name: string; publicKey: string; endpoint: string; meshIp: string }): Promise<{ success: boolean; error?: string }> {
+    return new Promise((resolve) => {
+      const postData = JSON.stringify(myInfo);
+      const options = {
+        hostname: peerMeshIp,
+        port: 7777,
+        path: '/add-peer',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+        },
+        timeout: 5000,
+      };
+
+      const req = http.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            const response = JSON.parse(data);
+            resolve({ success: response.success, error: response.error });
+          } catch {
+            resolve({ success: false, error: 'Invalid response' });
+          }
+        });
+      });
+
+      req.on('error', (err) => {
+        resolve({ success: false, error: err.message });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ success: false, error: 'Timeout' });
+      });
+
+      req.write(postData);
+      req.end();
+    });
   }
 
   /**

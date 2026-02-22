@@ -17,6 +17,7 @@ import { logger, setLogLevel, createSimpleLogger } from './utils/logger.js';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { getMeshManager } from './mesh/index.js';
 import { P2PStateManager, initP2PStateManager } from './p2p-state.js';
+import { startKnockServer, stopKnockServer, authorizePermanently } from './knock.js';
 
 // ============================================
 // Types
@@ -240,8 +241,22 @@ export class SfhaDaemon extends EventEmitter {
       }
     }
     
+    // Démarrer le serveur de knock et autoriser les peers existants
+    const meshManager = getMeshManager();
+    const meshConfig = meshManager.getConfig();
+    if (meshConfig?.meshNetwork) {
+      // Autoriser les IPs des peers existants
+      for (const peer of meshConfig.peers || []) {
+        if (peer.endpoint) {
+          const peerIp = peer.endpoint.split(':')[0];
+          authorizePermanently(peerIp);
+        }
+      }
+      // Démarrer le serveur de knock pour accepter les nouveaux nœuds
+      startKnockServer();
+    }
+    
     // Initialiser le P2P state manager pour la coordination entre nœuds
-    // Récupérer l'IP mesh (wg1) pour binder le serveur HTTP de façon sécurisée
     const meshIp = this.getMeshBindAddress();
     this.p2pStateManager = initP2PStateManager({
       port: 7777,
@@ -302,6 +317,9 @@ export class SfhaDaemon extends EventEmitter {
     
     // Arrêter le P2P state manager
     this.p2pStateManager?.stop();
+    
+    // Arrêter le serveur de knock
+    stopKnockServer();
     
     // Désactiver les ressources si leader
     if (this.isLeader) {
@@ -1294,35 +1312,15 @@ export class SfhaDaemon extends EventEmitter {
    * Fallback sur localhost si pas de mesh
    */
   private getMeshBindAddress(): string {
-    try {
-      const { execSync } = require('child_process');
-      // Récupérer l'IP de wg1 (interface WireGuard mesh)
-      const result = execSync("ip -4 addr show wg1 2>/dev/null | grep -oP 'inet \\K[0-9.]+'", {
-        encoding: 'utf8',
-        timeout: 5000,
-      }).trim();
-      if (result) {
-        logger.info(`P2P: utilisation de l'IP mesh ${result}`);
-        return result;
-      }
-    } catch {
-      // Pas d'interface wg1
-    }
-    
-    // Fallback: utiliser l'IP Corosync du nœud local
-    try {
-      const nodes = getClusterNodes();
-      const localNodeId = getLocalNodeId();
-      const localNode = nodes.find(n => n.nodeId === localNodeId);
-      if (localNode?.ip) {
-        logger.info(`P2P: utilisation de l'IP Corosync ${localNode.ip}`);
-        return localNode.ip;
-      }
-    } catch {
-      // Ignorer
-    }
-    
-    logger.warn('P2P: pas d\'IP mesh trouvée, écoute sur localhost uniquement');
+    // Écouter sur 0.0.0.0 pour accepter les connexions :
+    // - Via l'IP mesh (pour le polling P2P normal entre nœuds)
+    // - Via l'IP LAN (pour les notifications de join avant que le mesh soit bidirectionnel)
+    // 
+    // SÉCURITÉ: L'endpoint /add-peer requiert l'authKey du cluster
+    // Les autres endpoints (/state, /health) ne leakent que des infos basiques
+    // Pour une sécurité renforcée, configurer un firewall sur le port 7777
+    logger.info(`P2P: écoute sur 0.0.0.0:7777 (protégé par authKey)`);
+    return '0.0.0.0';
     return '127.0.0.1';
   }
 

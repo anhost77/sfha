@@ -6,11 +6,18 @@
  * qui permet aux autres nœuds de connaître son état (standby, leader, etc.)
  * 
  * Cela résout le problème de cmapctl qui n'est pas répliqué entre nœuds.
+ * 
+ * Endpoints:
+ * - GET /state : État du nœud (standby, leader)
+ * - GET /health : Health check simple
+ * - POST /add-peer : Ajouter un peer au mesh (appelé par les nœuds qui rejoignent)
  */
 
-import { createServer, IncomingMessage, ServerResponse, Server } from 'http';
+import http, { createServer, IncomingMessage, ServerResponse, Server } from 'http';
 import { getClusterNodes } from './corosync.js';
 import { logger } from './utils/logger.js';
+import { getMeshManager } from './mesh/manager.js';
+import { isIpAuthorized, authorizePermanently } from './knock.js';
 
 // ============================================
 // Types
@@ -21,6 +28,19 @@ export interface NodeState {
   standby: boolean;
   isLeader: boolean;
   timestamp: number;
+}
+
+export interface AddPeerRequest {
+  name: string;
+  publicKey: string;
+  endpoint: string;
+  meshIp: string;
+}
+
+export interface AddPeerResponse {
+  success: boolean;
+  message?: string;
+  error?: string;
 }
 
 export interface P2PStateConfig {
@@ -136,6 +156,16 @@ export class P2PStateManager {
    */
   private startServer(): void {
     this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      // Vérifier si l'IP source est autorisée
+      // On retourne 404 au lieu de 403 pour ne pas révéler l'existence du service
+      const clientIp = req.socket.remoteAddress?.replace('::ffff:', '') || '';
+      if (!isIpAuthorized(clientIp)) {
+        logger.debug(`P2P: Connexion ignorée de ${clientIp} (non autorisé)`);
+        res.writeHead(404);
+        res.end('Not Found');
+        return;
+      }
+      
       // Simple endpoint GET /state
       if (req.method === 'GET' && req.url === '/state') {
         const state: NodeState = {
@@ -154,6 +184,73 @@ export class P2PStateManager {
       if (req.method === 'GET' && req.url === '/health') {
         res.writeHead(200);
         res.end('OK');
+        return;
+      }
+      
+      // Add peer endpoint - called by joining nodes to register themselves
+      // SECURITY: Requires valid cluster authKey in request
+      if (req.method === 'POST' && req.url === '/add-peer') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', () => {
+          try {
+            const peerData = JSON.parse(body) as AddPeerRequest & { authKey?: string };
+            
+            // Validate required fields
+            if (!peerData.name || !peerData.publicKey || !peerData.endpoint || !peerData.meshIp) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Missing required fields: name, publicKey, endpoint, meshIp' }));
+              return;
+            }
+            
+            // SECURITY: Verify authKey matches cluster authKey
+            const mesh = getMeshManager();
+            const meshConfig = mesh.getConfig();
+            if (!meshConfig) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+              return;
+            }
+            
+            if (!peerData.authKey || peerData.authKey !== meshConfig.authKey) {
+              logger.debug(`P2P: Rejected add-peer from ${peerData.meshIp} - invalid authKey`);
+              res.writeHead(404);
+              res.end('Not Found');
+              return;
+            }
+            
+            // Add the peer using MeshManager
+            const result = mesh.addPeer({
+              name: peerData.name,
+              publicKey: peerData.publicKey,
+              endpoint: peerData.endpoint,
+              allowedIps: `${peerData.meshIp}/32`,
+            });
+            
+            if (result.success) {
+              logger.info(`P2P: Added peer ${peerData.name} (${peerData.meshIp}) via API`);
+              
+              // Autoriser l'IP de ce peer de façon permanente
+              if (peerData.endpoint) {
+                const peerIp = peerData.endpoint.split(':')[0];
+                authorizePermanently(peerIp);
+              }
+              
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, message: result.message }));
+            } else {
+              logger.warn(`P2P: Failed to add peer ${peerData.name}: ${result.error}`);
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: result.error }));
+            }
+          } catch (err: any) {
+            logger.error(`P2P: Error parsing add-peer request: ${err.message}`);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Invalid JSON' }));
+          }
+        });
         return;
       }
       
@@ -249,8 +346,7 @@ export class P2PStateManager {
         resolve(null);
       }, REQUEST_TIMEOUT);
       
-      import('http').then(({ default: http }) => {
-        const req = http.get(url, (res) => {
+      const req = http.get(url, (res) => {
           let data = '';
           
           res.on('data', (chunk) => {
@@ -277,7 +373,6 @@ export class P2PStateManager {
           clearTimeout(timeout);
           resolve(null);
         });
-      });
     });
   }
 }
