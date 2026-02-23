@@ -736,7 +736,6 @@ export class MeshManager {
 
     // Créer le fichier config.yml
     const configPath = '/etc/sfha/config.yml';
-    const { existsSync, writeFileSync } = require('fs');
     if (!existsSync(configPath)) {
       const configContent = `# Configuration sfha - générée par sfha join
 # En attente de propagation depuis le leader

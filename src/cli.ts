@@ -70,6 +70,78 @@ function formatDate(date: Date | string): string {
 // Commands
 // ============================================
 
+/**
+ * Calculate the cluster phase based on current state
+ * @returns { phase, wgPeersCount, pendingPeers }
+ */
+function calculateClusterPhase(corosyncRunning: boolean, corosyncNodesCount: number): {
+  phase: 'initializing' | 'collecting' | 'propagating' | 'active' | 'degraded' | null;
+  wgPeersCount: number;
+  pendingPeers: number;
+} {
+  // Count WireGuard peers
+  let wgPeersCount = 0;
+  try {
+    const wgOutput = execSync('wg show wg-sfha peers 2>/dev/null || true', { encoding: 'utf-8' });
+    wgPeersCount = wgOutput.trim().split('\n').filter(line => line.trim()).length;
+  } catch {
+    // wg-sfha doesn't exist
+  }
+  
+  // Check if wg-sfha interface exists
+  let wgExists = false;
+  try {
+    execSync('ip link show wg-sfha 2>/dev/null', { encoding: 'utf-8' });
+    wgExists = true;
+  } catch {
+    wgExists = false;
+  }
+  
+  // Calculate phase according to spec
+  let phase: 'initializing' | 'collecting' | 'propagating' | 'active' | 'degraded' | null = null;
+  let pendingPeers = 0;
+  
+  if (!corosyncRunning) {
+    // Corosync not running
+    if (!wgExists) {
+      // No cluster
+      phase = null;
+    } else if (wgPeersCount === 0) {
+      // Leader alone, no peers yet
+      phase = 'initializing';
+    } else {
+      // Peers have joined via WireGuard but Corosync not yet configured
+      phase = 'collecting';
+      pendingPeers = wgPeersCount;
+    }
+  } else {
+    // Corosync is running
+    // Check quorum via corosync-quorumtool
+    let quorumOk = false;
+    let allNodesOnline = true;
+    
+    try {
+      const quorumOutput = execSync('corosync-quorumtool -s 2>/dev/null || true', { encoding: 'utf-8' });
+      quorumOk = quorumOutput.includes('Quorate:          Yes');
+      
+      // Check node status via corosync-cmapctl
+      const nodesOutput = execSync('corosync-cfgtool -s 2>/dev/null || true', { encoding: 'utf-8' });
+      allNodesOnline = !nodesOutput.includes('status\t= 0');
+    } catch {
+      // If we can't determine, assume degraded
+      quorumOk = false;
+    }
+    
+    if (quorumOk && corosyncNodesCount > 0) {
+      phase = 'active';
+    } else {
+      phase = 'degraded';
+    }
+  }
+  
+  return { phase, wgPeersCount, pendingPeers };
+}
+
 async function statusCommand(options: { json?: boolean; config?: string; lang?: string }): Promise<void> {
   initI18n(options.lang);
   
@@ -79,7 +151,18 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
       const response = await sendCommand({ action: 'status' });
       
       if (options.json) {
-        console.log(JSON.stringify(response.data, null, 2));
+        // Add phase calculation to daemon response
+        const corosyncRunning = response.data?.corosync?.running ?? false;
+        const corosyncNodesCount = response.data?.corosync?.nodesOnline ?? 0;
+        const phaseInfo = calculateClusterPhase(corosyncRunning, corosyncNodesCount);
+        
+        const enrichedData = {
+          ...response.data,
+          phase: phaseInfo.phase,
+          wgPeersCount: phaseInfo.wgPeersCount,
+          pendingPeers: phaseInfo.pendingPeers,
+        };
+        console.log(JSON.stringify(enrichedData, null, 2));
         return;
       }
       
@@ -95,6 +178,9 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
     const election = electLeader();
     const vips = getVipsState(config.vips);
     
+    // Calculate phase
+    const phaseInfo = calculateClusterPhase(corosync.running, corosync.nodes.filter(n => n.online).length);
+    
     if (options.json) {
       console.log(JSON.stringify({
         cluster: config.cluster.name,
@@ -108,6 +194,9 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
         leader: election?.leaderName,
         isLeader: election?.isLocalLeader,
         vips,
+        phase: phaseInfo.phase,
+        wgPeersCount: phaseInfo.wgPeersCount,
+        pendingPeers: phaseInfo.pendingPeers,
       }, null, 2));
       return;
     }
