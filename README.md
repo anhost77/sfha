@@ -11,7 +11,7 @@
 # sfha — Haute Disponibilité légère pour Linux
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.5-green.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.0.58-green.svg)](package.json)
 [![Debian](https://img.shields.io/badge/Debian-11%2B-red.svg)](https://www.debian.org/)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%2B-orange.svg)](https://ubuntu.com/)
 [![Made in France](https://img.shields.io/badge/Made%20in-France%20🇫🇷-blue.svg)](#)
@@ -41,10 +41,10 @@
 
 ```bash
 # Télécharger le .deb depuis les releases GitHub
-wget https://github.com/anhost77/sfha/releases/latest/download/sfha_1.0.5_amd64.deb
+wget https://github.com/anhost77/sfha/releases/latest/download/sfha_1.0.58_amd64.deb
 
 # Installer (aucune dépendance requise sauf corosync)
-sudo dpkg -i sfha_1.0.5_amd64.deb
+sudo dpkg -i sfha_1.0.58_amd64.deb
 
 # Vérifier l'installation
 sfha --version
@@ -71,14 +71,14 @@ sfha --version
 
 ## 🚀 Quick Start
 
-### Créer un cluster (premier nœud)
+### Étape 1 : Initialiser le cluster (nœud leader)
 
 ```bash
 # Initialiser avec mesh WireGuard intégré
-sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24
+sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24 --endpoint <IP_PUBLIQUE>
 
 # Avec STONITH Proxmox (optionnel)
-sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24 \
+sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24 --endpoint <IP_PUBLIQUE> \
   --stonith proxmox \
   --proxmox-url https://192.168.1.100:8006 \
   --proxmox-token root@pam!sfha \
@@ -86,17 +86,37 @@ sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24 \
   --pve-node pve01 \
   --vmid 101
 
-# Ou configuration interactive
+# Ou configuration interactive STONITH
 sudo sfha stonith setup
 
-# Copier le token affiché pour les autres nœuds
+# ➜ Copier le token affiché pour les autres nœuds
 ```
 
-### Rejoindre le cluster (autres nœuds)
+### Étape 2 : Rejoindre le cluster (autres nœuds)
 
 ```bash
-# Rejoindre avec le token
-sudo sfha join <token>
+# Sur chaque nœud secondaire : établit uniquement le tunnel WireGuard
+sudo sfha join <token> --endpoint <IP_PUBLIQUE_DU_NOEUD>
+```
+
+> ℹ️ **Note :** `sfha join` établit uniquement le tunnel WireGuard vers le leader. 
+> Il n'y a pas encore de Corosync ni de full-mesh à cette étape.
+
+### Étape 3 : Propager la configuration (sur le leader)
+
+```bash
+# Une fois tous les nœuds joints, exécuter sur le LEADER :
+sudo sfha propagate
+```
+
+Cette commande :
+- 🔍 Découvre tous les peers WireGuard connectés
+- 🌐 Configure le full-mesh WireGuard (tous les nœuds se connaissent)
+- ⚙️ Génère et distribue la configuration Corosync
+- 🚀 Démarre les daemons sur tous les nœuds
+
+```
+✓ Propagation terminée: 3/3 nœuds mis à jour
 ```
 
 ### Configurer les ressources
@@ -167,6 +187,9 @@ sfha reload              # Recharger la config
 # Mesh WireGuard
 sfha mesh status         # État du mesh
 sfha mesh token          # Générer un nouveau token
+
+# Cluster
+sfha propagate           # Propager la config à tous les nœuds (depuis le leader)
 
 # STONITH
 sfha stonith status      # État du fencing

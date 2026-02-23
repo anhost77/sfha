@@ -15,6 +15,7 @@ import { initI18n, t } from './i18n.js';
 import { getMeshManager, isWireGuardInstalled } from './mesh/index.js';
 import { isServiceActive } from './resources.js';
 import { logger } from './utils/logger.js';
+import { propagateConfigToAllPeers } from './p2p-state.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -27,7 +28,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.53';
+const VERSION = '1.0.58';
 
 function getVersion(): string {
   return VERSION;
@@ -1750,7 +1751,9 @@ async function joinCommand(token: string, options: { endpoint?: string; ip?: str
   }
 
   const mesh = getMeshManager();
-  const result = await mesh.join({
+  
+  // Utiliser joinSimple qui monte UNIQUEMENT le tunnel WireGuard
+  const result = await mesh.joinSimple({
     token,
     endpoint: options.endpoint,
     meshIp: options.ip,
@@ -1762,45 +1765,57 @@ async function joinCommand(token: string, options: { endpoint?: string; ip?: str
   }
 
   console.log(colorize('✓', 'green'), result.message);
+  console.log();
+  console.log(colorize('ℹ', 'blue'), 'Tunnel WireGuard établi vers le leader.');
+  console.log(colorize('ℹ', 'blue'), 'Exécutez maintenant sur le LEADER:');
+  console.log();
+  console.log('    sfha propagate');
+  console.log();
+}
+
+program
+  .command('propagate')
+  .description('Propager la configuration à tous les nœuds (à exécuter sur le leader)')
+  .option('--timeout <ms>', 'Timeout par nœud en ms', '10000')
+  .action(propagateCommand);
+
+async function propagateCommand(options: { timeout?: string; lang?: string }): Promise<void> {
+  initI18n(options.lang);
   
-  // Créer automatiquement le config.yml
-  const configPath = '/etc/sfha/config.yml';
+  const mesh = getMeshManager();
   const meshConfig = mesh.getConfig();
   
-  if (!existsSync(configPath) && meshConfig) {
-    // Utiliser le hostname de la machine comme nom de nœud
-    const nodeName = hostname();
-    const peerCount = meshConfig.peers?.length || 0;
-    const priority = 100 - peerCount * 10; // Priorité décroissante selon l'ordre d'arrivée
-    
-    const configContent = `# Configuration sfha - générée par sfha join
-cluster:
-  name: ${meshConfig.clusterName}
-  quorum_required: true
-  failover_delay_ms: 3000
-  poll_interval_ms: 2000
-
-node:
-  name: ${nodeName}
-  priority: ${priority}
-
-vips: []
-services: []
-`;
-    
-    writeFileSync(configPath, configContent);
-    console.log(colorize('✓', 'green'), 'Configuration créée:', configPath);
-    console.log(colorize('ℹ', 'blue'), `Nœud configuré comme: ${nodeName}`);
+  if (!meshConfig) {
+    console.error(colorize('Erreur:', 'red'), 'Aucun mesh configuré. Êtes-vous sur le leader ?');
+    process.exit(1);
   }
   
-  // Démarrer le daemon automatiquement
-  try {
-    execSync('systemctl enable sfha 2>/dev/null || true', { encoding: 'utf-8' });
-    execSync('systemctl start sfha', { encoding: 'utf-8' });
-    console.log(colorize('✓', 'green'), 'Daemon sfha démarré');
-  } catch (e: any) {
-    console.log(colorize('⚠', 'yellow'), 'Impossible de démarrer sfha automatiquement:', e.message);
-    console.log('  Démarrez manuellement avec: systemctl start sfha');
+  if (!meshConfig.peers || meshConfig.peers.length === 0) {
+    console.log(colorize('ℹ', 'blue'), 'Aucun peer à propager.');
+    return;
+  }
+  
+  const timeoutMs = parseInt(options.timeout || '10000', 10);
+  
+  console.log(colorize('⚙', 'blue'), `Propagation de la configuration à ${meshConfig.peers.length} nœud(s)...`);
+  console.log();
+  
+  const result = await propagateConfigToAllPeers(timeoutMs);
+  
+  console.log();
+  if (result.success) {
+    console.log(colorize('✓', 'green'), `Propagation terminée: ${result.succeeded}/${result.total} nœuds mis à jour`);
+    if (result.failed > 0) {
+      console.log(colorize('⚠', 'yellow'), `${result.failed} nœud(s) en échec`);
+    }
+  } else {
+    console.error(colorize('✗', 'red'), `Propagation échouée: ${result.error}`);
+    if (result.errors && result.errors.length > 0) {
+      for (const err of result.errors) {
+        console.error(`  - ${err.node}: ${err.error}`);
+      }
+    }
+    process.exit(1);
   }
 }
 

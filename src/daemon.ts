@@ -73,7 +73,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.53';
+const VERSION = '1.0.58';
 
 // ============================================
 // Daemon
@@ -196,9 +196,10 @@ export class SfhaDaemon extends EventEmitter {
       this.loadConfiguration();
     }
     
-    // Vérifier Corosync
-    if (!isCorosyncRunning()) {
-      throw new Error(t('corosync.notRunning'));
+    // Vérifier si Corosync est en cours - si non, mode "attente de config"
+    const corosyncActive = isCorosyncRunning();
+    if (!corosyncActive) {
+      logger.info('Corosync non démarré - mode attente de configuration via propagate');
     }
     
     // Démarrer le serveur de contrôle
@@ -247,17 +248,9 @@ export class SfhaDaemon extends EventEmitter {
     
     // Synchroniser les peers manquants depuis l'initiateur
     // Cela garantit que tous les nodes ont la liste complète des peers
-    // Attendre 3 secondes que le mesh WireGuard soit stable
-    setTimeout(() => {
-      this.syncPeersFromInitiator();
-    }, 3000);
-    
-    // Synchro périodique des peers (toutes les 30 secondes)
-    // Permet de récupérer les peers manquants si un join a échoué partiellement
-    // ou si des nodes ont été ajoutés après notre démarrage
-    this.meshSyncInterval = setInterval(() => {
-      this.syncPeersFromInitiator();
-    }, 30000);
+    // NOTE: Pas de sync automatique depuis l'initiateur.
+    // La propagation est manuelle via 'sfha propagate' sur le leader.
+    // Cela évite les race conditions et les cascades de restart.
     
     // Attendre le quorum si requis
     if (this.config!.cluster.quorumRequired) {

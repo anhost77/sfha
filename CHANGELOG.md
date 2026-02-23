@@ -5,6 +5,37 @@ Toutes les modifications notables de ce projet seront documentées dans ce fichi
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Versionnement Sémantique](https://semver.org/lang/fr/).
 
+## [1.0.58] - 2026-02-23
+
+### Changements majeurs
+
+- **Nouveau workflow de déploiement en 2 étapes** : plus stable pour les clusters multi-nœuds
+  - `sfha join` établit uniquement le tunnel WireGuard vers le leader
+  - `sfha propagate` (sur le leader) configure le full-mesh et démarre Corosync
+
+### Ajouté
+
+- **Commande `sfha propagate`** : propagation explicite de la configuration à tous les nœuds
+  - Découvre automatiquement les peers via `wg show wg-sfha`
+  - Génère les configs WireGuard full-mesh
+  - Génère et distribue les configs Corosync
+  - Démarre les daemons sur tous les nœuds
+
+- **Méthode `joinSimple()`** : join léger sans notification des peers
+
+### Corrigé
+
+- **Cascades de restart Corosync** : suppression du restart automatique dans `syncMeshPeersFromInitiator()`
+- **Sync périodique supprimé** : plus de sync automatique toutes les 30s qui causait des désynchronisations
+- **Stabilité multi-nœuds** : le cluster scale correctement à 4+ nœuds sans cascades
+
+### Supprimé
+
+- Notification automatique des peers lors du join (remplacé par propagate explicite)
+- Sync périodique de la configuration (source de bugs)
+
+---
+
 ## [1.0.3] - 2026-02-20
 
 ### Ajouté

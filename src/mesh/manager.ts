@@ -440,27 +440,35 @@ export class MeshManager {
     }
 
     // ===== Récupérer la config Corosync complète depuis l'initiateur =====
-    // L'initiateur a maintenant notre nœud dans sa config, donc il nous retournera
-    // la liste complète de tous les nœuds du cluster
+    // TOUJOURS essayer de sync la config, même si la notification a échoué
+    // (le knock a pu ouvrir le port quand même)
     let corosyncNodes: { name: string; ip: string; nodeId: number }[] = [];
     
+    // Attendre un peu si l'initiateur a été notifié (il doit mettre à jour sa config)
     if (initiatorNotified) {
-      // Attendre que l'initiateur ait synchronisé (2 secondes)
       await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // Retry jusqu'à 3 fois pour récupérer la config corosync
-      for (let retry = 0; retry < 3; retry++) {
+    }
+    
+    // Essayer de récupérer la config (3 retries, hybrid: mesh first then public)
+    for (let retry = 0; retry < 3; retry++) {
+      try {
+        // Essayer d'abord via mesh IP (si WireGuard est déjà établi)
+        let corosyncResult;
         try {
-          const corosyncResult = await fetchCorosyncNodesFromPeer(initiatorPublicIp, token.authkey);
-          if (corosyncResult.success && corosyncResult.nodes && corosyncResult.nodes.length > 0) {
-            corosyncNodes = corosyncResult.nodes;
-            notifyResults.push(`✓ Config Corosync synchronisée (${corosyncNodes.length} nœuds)`);
-            break;
-          }
-        } catch (err: any) {
-          // Retry après 1 seconde
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          corosyncResult = await fetchCorosyncNodesFromPeer(initiatorMeshIp, token.authkey, 2000);
+        } catch {
+          // Fallback sur IP publique
+          corosyncResult = await fetchCorosyncNodesFromPeer(initiatorPublicIp, token.authkey, 5000);
         }
+        
+        if (corosyncResult.success && corosyncResult.nodes && corosyncResult.nodes.length > 0) {
+          corosyncNodes = corosyncResult.nodes;
+          notifyResults.push(`✓ Config Corosync synchronisée (${corosyncNodes.length} nœuds)`);
+          break;
+        }
+      } catch (err: any) {
+        // Retry après 1 seconde
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
     
@@ -570,6 +578,222 @@ export class MeshManager {
     return {
       success: true,
       message: `Rejoint le cluster "${token.cluster}" avec l'IP mesh ${meshIp}. ${allPeers.length} peer(s) initial(s).${notifyLog ? '\n' + notifyResults.join(', ') : ''}`,
+    };
+  }
+
+  /**
+   * Join simplifié - Monte UNIQUEMENT le tunnel WireGuard vers le leader
+   * Pas de notification, pas de Corosync. Le leader fera tout via 'sfha propagate'.
+   */
+  async joinSimple(options: MeshJoinOptions): Promise<MeshOperationResult> {
+    // Vérifier que WireGuard est installé
+    if (!isWireGuardInstalled()) {
+      return {
+        success: false,
+        error: 'WireGuard n\'est pas installé. Installez-le avec: apt install wireguard-tools',
+      };
+    }
+
+    // Vérifier qu'aucun mesh n'existe déjà
+    if (this.config) {
+      return {
+        success: false,
+        error: 'Un mesh existe déjà. Utilisez "sfha mesh down" puis supprimez /etc/sfha/mesh.json pour rejoindre un autre cluster.',
+      };
+    }
+
+    // Parser le token
+    let token;
+    try {
+      token = parseJoinToken(options.token);
+    } catch (error: any) {
+      return {
+        success: false,
+        error: `Token invalide: ${error.message}`,
+      };
+    }
+
+    const port = DEFAULT_PORT;
+
+    // Générer les clés WireGuard
+    const keys = generateKeyPair();
+    saveKeys(keys, WG_KEYS_DIR);
+
+    // Sauvegarder l'authkey Corosync (pour plus tard)
+    saveAuthKey(token.authkey, COROSYNC_AUTHKEY_PATH);
+
+    // Allouer une IP mesh unique
+    let meshIp = options.meshIp;
+    if (!meshIp) {
+      const usedIps = [token.meshIp];
+      if (token.peers) {
+        for (const p of token.peers) {
+          if (p.meshIp && !usedIps.includes(p.meshIp)) {
+            usedIps.push(p.meshIp);
+          }
+        }
+      }
+      
+      // Générer une IP unique basée sur le hostname
+      const hostnameStr = getHostname();
+      const uniqueSeed = Date.now() % 1000 + hostnameStr.split('').reduce((a: number, c: string) => a + c.charCodeAt(0), 0);
+      
+      meshIp = allocateNextIp(token.meshNetwork, usedIps);
+      
+      // Ajouter un offset pour éviter les collisions si plusieurs nœuds joignent simultanément
+      const [baseIp, cidr] = meshIp.split('/');
+      const ipParts = baseIp.split('.').map(Number);
+      const baseNum = (ipParts[0] << 24) + (ipParts[1] << 16) + (ipParts[2] << 8) + ipParts[3];
+      const offset = uniqueSeed % 250;
+      const candidateNum = baseNum + offset;
+      const candidateOctets = [
+        (candidateNum >>> 24) & 255,
+        (candidateNum >>> 16) & 255,
+        (candidateNum >>> 8) & 255,
+        candidateNum & 255,
+      ];
+      const candidateIp = candidateOctets.join('.');
+      
+      if (!usedIps.includes(candidateIp) && offset > 0) {
+        meshIp = `${candidateIp}/${cidr}`;
+      }
+    }
+
+    // Vérifier les conflits d'IP
+    const ipValidation = validateMeshIp(meshIp, false);
+    if (!ipValidation.valid) {
+      const usedIps = [token.meshIp];
+      const freeIp = findFreeIp(token.meshNetwork, usedIps);
+      if (freeIp) {
+        console.warn(`⚠️  L'IP ${meshIp} est en conflit, utilisation de ${freeIp} à la place`);
+        meshIp = freeIp;
+      } else {
+        return {
+          success: false,
+          error: `Aucune IP libre trouvée dans le réseau ${token.meshNetwork}`,
+        };
+      }
+    }
+
+    // Détecter l'endpoint
+    let endpoint = options.endpoint;
+    if (!endpoint) {
+      endpoint = detectPublicEndpoint(port) || `0.0.0.0:${port}`;
+    } else if (!endpoint.includes(':')) {
+      endpoint = `${endpoint}:${port}`;
+    }
+
+    // Créer UNIQUEMENT le peer initiateur
+    const initiatorPeer: MeshPeer = {
+      name: token.initiatorName || 'initiator',
+      publicKey: token.pubkey,
+      endpoint: token.endpoint,
+      allowedIps: `${token.meshIp}/32`,
+      persistentKeepalive: DEFAULT_KEEPALIVE,
+    };
+
+    // Créer la configuration minimale
+    this.config = {
+      interface: WG_INTERFACE,
+      listenPort: port,
+      privateKey: keys.privateKey,
+      publicKey: keys.publicKey,
+      meshIp,
+      meshNetwork: token.meshNetwork,
+      clusterName: token.cluster,
+      authKey: token.authkey,
+      corosyncPort: token.corosyncPort,
+      peers: [initiatorPeer],
+    };
+
+    this.saveConfig();
+
+    // Créer l'interface WireGuard
+    createInterface(WG_INTERFACE, meshIp, keys.privateKey, port);
+
+    // Ajouter le peer initiateur
+    addPeer(WG_INTERFACE, initiatorPeer);
+
+    // Générer et sauvegarder la config wg-quick pour persistance au boot
+    const wgConfig = generateWgQuickConfig(
+      keys.privateKey,
+      meshIp,
+      port,
+      this.config.peers
+    );
+    saveWgQuickConfig(WG_INTERFACE, wgConfig);
+    enableWgQuickService(WG_INTERFACE);
+
+    // Créer une config Corosync minimale (juste initiateur + ce nœud)
+    // Sera mise à jour par propagate avec tous les nœuds
+    const localNodeName = getHostname();
+    const localMeshIp = extractMeshIp(meshIp);
+    const corosyncNodes = [
+      { name: token.initiatorName || 'initiator', ip: token.meshIp, nodeId: 1 },
+      { name: localNodeName, ip: localMeshIp, nodeId: 2 },
+    ];
+    updateCorosyncForMesh(token.cluster, corosyncNodes, token.corosyncPort);
+
+    // Créer le fichier config.yml
+    const configPath = '/etc/sfha/config.yml';
+    const { existsSync, writeFileSync } = require('fs');
+    if (!existsSync(configPath)) {
+      const configContent = `# Configuration sfha - générée par sfha join
+# En attente de propagation depuis le leader
+cluster:
+  name: ${token.cluster}
+  quorum_required: false
+  failover_delay_ms: 3000
+  poll_interval_ms: 2000
+
+node:
+  name: ${localNodeName}
+  priority: 90
+
+vips: []
+services: []
+`;
+      writeFileSync(configPath, configContent);
+    }
+
+    // Démarrer Corosync et sfha
+    try {
+      execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
+      execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
+      execSync('systemctl enable sfha 2>/dev/null || true', { stdio: 'pipe' });
+      execSync('systemctl start sfha 2>/dev/null || true', { stdio: 'pipe' });
+    } catch {
+      // Ignore les erreurs
+    }
+
+    // Notifier le leader pour qu'il nous ajoute comme peer
+    // C'est nécessaire car WireGuard est bidirectionnel - le leader doit nous connaître
+    const myPeerInfo = {
+      name: localNodeName,
+      publicKey: keys.publicKey,
+      endpoint: endpoint,
+      meshIp: localMeshIp,
+      authKey: token.authkey,
+    };
+
+    // Essayer via IP publique (le tunnel mesh n'est pas encore établi côté leader)
+    const initiatorPublicIp = token.endpoint.split(':')[0];
+    try {
+      await sendKnock(initiatorPublicIp, token.authkey);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      const result = await this.notifyPeerViaApi(token.meshIp, initiatorPublicIp, myPeerInfo);
+      if (!result.success) {
+        // Log mais continue - propagate pourra quand même fonctionner si le leader nous ping
+        console.warn(`⚠ Notification leader échouée: ${result.error}`);
+      }
+    } catch (e: any) {
+      console.warn(`⚠ Notification leader échouée: ${e.message}`);
+    }
+
+    return {
+      success: true,
+      message: `Tunnel WireGuard établi vers ${token.cluster} (${meshIp})`,
     };
   }
 

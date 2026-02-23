@@ -237,8 +237,10 @@ export class P2PStateManager {
             if (result.success) {
               logger.info(`P2P: Added peer ${peerData.name} (${peerData.meshIp}) via API`);
               
+              // Marquer le timestamp pour éviter les syncs trop rapides
+              lastJoinReceived = Date.now();
+              
               // Autoriser l'IP publique ET mesh de ce peer de façon permanente
-              // L'IP mesh est nécessaire car les communications P2P passent par WireGuard
               if (peerData.endpoint) {
                 const peerIp = peerData.endpoint.split(':')[0];
                 authorizePermanently(peerIp);
@@ -246,140 +248,12 @@ export class P2PStateManager {
               authorizePermanently(cleanMeshIp);
               logger.debug(`P2P: Authorized IPs for ${peerData.name}: public=${peerData.endpoint?.split(':')[0]}, mesh=${cleanMeshIp}`);
               
-              // ===== Propager le nouveau peer aux autres nœuds existants via WireGuard =====
-              // Cela permet à node2 de connaître node3 quand node3 rejoint via node1
-              if (!peerData.propagated && meshConfig.peers.length > 0) {
-                logger.info(`P2P: Propagating new peer ${peerData.name} to ${meshConfig.peers.length} existing peers`);
-                
-                for (const existingPeer of meshConfig.peers) {
-                  // Ne pas propager au peer qu'on vient d'ajouter
-                  if (existingPeer.publicKey === peerData.publicKey) continue;
-                  
-                  // Utiliser l'IP mesh du peer ET l'IP publique pour le fallback
-                  const existingPeerMeshIp = existingPeer.allowedIps?.split('/')[0];
-                  const existingPeerPublicIp = existingPeer.endpoint?.split(':')[0];
-                  if (!existingPeerMeshIp) continue;
-                  
-                  try {
-                    // ===== ÉTAPE 1: Attendre que le handshake WireGuard soit établi =====
-                    // Sans handshake, les paquets vers l'IP mesh ne passent pas
-                    logger.info(`P2P: Waiting for WireGuard handshake with ${existingPeer.name}...`);
-                    const handshakeOk = await waitForWgHandshake(existingPeer.publicKey, 15000, 500);
-                    if (!handshakeOk) {
-                      logger.warn(`P2P: No WireGuard handshake with ${existingPeer.name}, will use public IP fallback`);
-                    }
-                    
-                    // ===== ÉTAPE 2: Knock pour ouvrir le port =====
-                    if (existingPeerPublicIp) {
-                      await sendKnock(existingPeerPublicIp, meshConfig.authKey);
-                      await new Promise(resolve => setTimeout(resolve, 300));
-                    }
-                    
-                    // ===== ÉTAPE 3: Propager via le mesh (avec fallback public) =====
-                    const propagationData = {
-                      name: peerData.name,
-                      publicKey: peerData.publicKey,
-                      endpoint: peerData.endpoint,
-                      meshIp: peerData.meshIp,
-                      authKey: meshConfig.authKey,
-                      propagated: true,
-                    };
-                    
-                    const result = await propagatePeerToNode(existingPeerMeshIp, existingPeerPublicIp, propagationData);
-                    if (result.success) {
-                      logger.info(`P2P: Propagated ${peerData.name} to ${existingPeer.name}`);
-                    } else {
-                      logger.warn(`P2P: Failed to propagate ${peerData.name} to ${existingPeer.name}: ${result.error}`);
-                    }
-                  } catch (err: any) {
-                    logger.warn(`P2P: Failed to propagate ${peerData.name} to ${existingPeer.name}: ${err.message}`);
-                  }
-                }
-              }
+              // NOTE: Pas de propagation automatique aux autres nœuds.
+              // L'utilisateur doit exécuter 'sfha propagate' sur le leader pour synchroniser.
+              // Cela évite les race conditions et les cascades de restart.
               
-              // ===== Propager les peers EXISTANTS vers le NOUVEAU node =====
-              // Cela permet à node3 de connaître node2 quand node3 rejoint via node1
-              if (!peerData.propagated && meshConfig.peers.length > 1) {
-                const newNodeMeshIp = cleanMeshIp;
-                const newNodePublicIp = peerData.endpoint?.split(':')[0];
-                
-                // ===== ÉTAPE 1: Attendre que le handshake WireGuard soit établi avec le nouveau node =====
-                logger.info(`P2P: Waiting for WireGuard handshake with new node ${peerData.name}...`);
-                const handshakeOk = await waitForWgHandshake(peerData.publicKey, 30000, 500);
-                if (!handshakeOk) {
-                  logger.warn(`P2P: No WireGuard handshake with new node ${peerData.name}, will use public IP fallback`);
-                }
-                
-                logger.info(`P2P: Sending ${meshConfig.peers.length - 1} existing peers to new node ${peerData.name}`);
-                
-                for (const existingPeer of meshConfig.peers) {
-                  // Ne pas envoyer le nouveau peer à lui-même
-                  if (existingPeer.publicKey === peerData.publicKey) continue;
-                  
-                  try {
-                    // ===== ÉTAPE 2: Knock pour ouvrir le port =====
-                    if (newNodePublicIp) {
-                      await sendKnock(newNodePublicIp, meshConfig.authKey);
-                      await new Promise(resolve => setTimeout(resolve, 300));
-                    }
-                    
-                    // ===== ÉTAPE 3: Envoyer le peer existant (avec fallback public) =====
-                    const existingPeerMeshIp = existingPeer.allowedIps?.split('/')[0] || '';
-                    const reverseData = {
-                      name: existingPeer.name,
-                      publicKey: existingPeer.publicKey,
-                      endpoint: existingPeer.endpoint || '',
-                      meshIp: existingPeerMeshIp,
-                      authKey: meshConfig.authKey,
-                      propagated: true,
-                    };
-                    
-                    const result = await propagatePeerToNode(newNodeMeshIp, newNodePublicIp, reverseData);
-                    if (result.success) {
-                      logger.info(`P2P: Sent existing peer ${existingPeer.name} to new node ${peerData.name}`);
-                    } else {
-                      logger.warn(`P2P: Failed to send ${existingPeer.name} to ${peerData.name}: ${result.error}`);
-                    }
-                  } catch (err: any) {
-                    logger.warn(`P2P: Failed to send ${existingPeer.name} to ${peerData.name}: ${err.message}`);
-                  }
-                }
-              }
-              
-              // ===== Synchroniser la config Corosync sur TOUS les nœuds (y compris le nouveau) =====
-              // L'initiateur (ce nœud) a la config complète, on la pousse à TOUS les peers
-              // Le nouveau nœud a besoin de la config mise à jour car il a peut-être fetch
-              // une version incomplète avant qu'on l'ajoute à notre liste
-              const corosyncNodes = getCorosyncNodes();
-              if (corosyncNodes.length > 1 && meshConfig.peers.length > 0) {
-                logger.info(`P2P: Syncing corosync config (${corosyncNodes.length} nodes) to ${meshConfig.peers.length} peers`);
-                
-                for (const peer of meshConfig.peers) {
-                  const peerMeshIp = peer.allowedIps.split('/')[0];
-                  const peerEndpoint = peer.endpoint?.split(':')[0];
-                  const isNewNode = peerMeshIp === cleanMeshIp;
-                  
-                  try {
-                    // ===== ÉTAPE 1: Attendre le handshake WireGuard =====
-                    const handshakeOk = await waitForWgHandshake(peer.publicKey, 15000, 500);
-                    if (!handshakeOk) {
-                      logger.warn(`P2P: No WireGuard handshake with ${peer.name}, skipping corosync sync`);
-                      continue;
-                    }
-                    
-                    // ===== ÉTAPE 2: Knock pour ouvrir le port =====
-                    if (peerEndpoint) {
-                      await sendKnock(peerEndpoint, meshConfig.authKey);
-                      await new Promise(resolve => setTimeout(resolve, 300));
-                    }
-                    
-                    // ===== ÉTAPE 3: Synchro corosync =====
-                    await syncCorosyncToPeer(peerMeshIp, corosyncNodes, meshConfig.authKey, meshConfig.clusterName);
-                    logger.info(`P2P: Synced corosync config to ${peer.name}${isNewNode ? ' (new node)' : ''}`);
-                  } catch (err: any) {
-                    logger.warn(`P2P: Failed to sync corosync to ${peer.name}: ${err.message}`);
-                  }
-                }
+              if (!peerData.propagated) {
+                logger.info(`P2P: Peer ${peerData.name} enregistré. Exécutez 'sfha propagate' pour synchroniser tous les nœuds.`);
               }
               
               res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -534,6 +408,149 @@ export class P2PStateManager {
             logger.error(`P2P: Error parsing sync-corosync request: ${err.message}`);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, error: 'Invalid JSON' }));
+          }
+        });
+        return;
+      }
+      
+      // ===== POST /full-config =====
+      // Reçoit la config complète (WireGuard + Corosync) et l'applique
+      // Utilisé par 'sfha propagate' pour configurer les nœuds après un joinSimple
+      if (req.method === 'POST' && req.url === '/full-config') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body) as {
+              authKey?: string;
+              clusterName: string;
+              corosyncPort?: number;
+              corosyncNodes: MeshNode[];
+              wgPeers: Array<{ name: string; publicKey: string; endpoint: string; meshIp: string }>;
+              nodeId: number;
+            };
+            
+            const mesh = getMeshManager();
+            const meshConfig = mesh.getConfig();
+            
+            if (!meshConfig) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+              return;
+            }
+            
+            if (!data.authKey || data.authKey !== meshConfig.authKey) {
+              logger.debug(`P2P: Rejected full-config request - invalid authKey`);
+              res.writeHead(404);
+              res.end('Not Found');
+              return;
+            }
+            
+            logger.info(`P2P: Receiving full config (${data.wgPeers.length} WG peers, ${data.corosyncNodes.length} Corosync nodes)`);
+            
+            // 1. Ajouter les peers WireGuard manquants
+            for (const peer of data.wgPeers) {
+              const exists = meshConfig.peers.some(p => p.publicKey === peer.publicKey);
+              if (!exists) {
+                mesh.addPeer({
+                  name: peer.name,
+                  publicKey: peer.publicKey,
+                  endpoint: peer.endpoint,
+                  allowedIps: `${peer.meshIp}/32`,
+                });
+                logger.info(`P2P: Added WG peer ${peer.name} (${peer.meshIp})`);
+              }
+            }
+            
+            // 2. Appliquer la config Corosync
+            const corosyncPort = data.corosyncPort || meshConfig.corosyncPort || 5405;
+            updateCorosyncForMesh(data.clusterName, data.corosyncNodes, corosyncPort);
+            
+            // 3. Créer le fichier config.yml si absent
+            const configPath = '/etc/sfha/config.yml';
+            const hostname = require('os').hostname();
+            if (!require('fs').existsSync(configPath)) {
+              const configContent = `# Configuration sfha - générée par sfha propagate
+cluster:
+  name: ${data.clusterName}
+  quorum_required: true
+  failover_delay_ms: 3000
+  poll_interval_ms: 2000
+
+node:
+  name: ${hostname}
+  priority: ${100 - data.nodeId * 10}
+
+vips: []
+services: []
+`;
+              require('fs').writeFileSync(configPath, configContent);
+              logger.info(`P2P: Created config.yml for ${hostname}`);
+            }
+            
+            // 4. NE PAS démarrer Corosync maintenant - attendre que TOUS les nœuds soient configurés
+            // Le leader enverra /reload-services quand tout sera prêt
+            logger.info(`P2P: Config applied, waiting for reload signal`);
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Config applied, waiting for reload' }));
+          } catch (err: any) {
+            logger.error(`P2P: Error parsing full-config request: ${err.message}`);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          }
+        });
+        return;
+      }
+      
+      // ===== POST /reload-services =====
+      // Appelé par le leader APRÈS que tous les nœuds ont reçu leur config
+      // Démarre/restart Corosync et sfha
+      if (req.method === 'POST' && req.url === '/reload-services') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', () => {
+          try {
+            const data = JSON.parse(body) as { authKey?: string };
+            
+            const mesh = getMeshManager();
+            const meshConfig = mesh.getConfig();
+            
+            if (!meshConfig) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+              return;
+            }
+            
+            if (!data.authKey || data.authKey !== meshConfig.authKey) {
+              res.writeHead(404);
+              res.end('Not Found');
+              return;
+            }
+            
+            logger.info(`P2P: Reload signal received, starting services...`);
+            
+            // Démarrer/restart Corosync et sfha
+            try {
+              execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
+              execSync('systemctl restart corosync 2>/dev/null || true', { stdio: 'pipe' });
+              execSync('sleep 2', { stdio: 'pipe' });
+              execSync('systemctl enable sfha 2>/dev/null || true', { stdio: 'pipe' });
+              execSync('systemctl restart sfha 2>/dev/null || true', { stdio: 'pipe' });
+              logger.info(`P2P: Services restarted`);
+            } catch (e: any) {
+              logger.warn(`P2P: Error restarting services: ${e.message}`);
+            }
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Services restarted' }));
+          } catch (err: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
           }
         });
         return;
@@ -855,14 +872,15 @@ export function syncCorosyncToPeer(
  */
 export function fetchCorosyncNodesFromPeer(
   peerIp: string, 
-  authKey: string
+  authKey: string,
+  timeoutMs: number = 5000
 ): Promise<{ success: boolean; nodes?: MeshNode[]; clusterName?: string; corosyncPort?: number; error?: string }> {
   return new Promise((resolve) => {
     const url = `http://${peerIp}:7777/corosync-nodes?authKey=${encodeURIComponent(authKey)}`;
     
     const timeout = setTimeout(() => {
       resolve({ success: false, error: 'Timeout' });
-    }, 5000);
+    }, timeoutMs);
     
     const req = http.get(url, (res) => {
       let data = '';
@@ -976,6 +994,16 @@ export async function syncMeshPeersFromInitiator(): Promise<{ success: boolean; 
     return { success: false, added: 0, error: 'No mesh configured' };
   }
   
+  // === STABILISATION ===
+  // Après un join, attendre 30 secondes avant de sync
+  // Cela laisse le temps au mesh WireGuard et à Corosync de converger
+  const STABILIZATION_MS = 30000;
+  const timeSinceLastJoin = Date.now() - lastJoinReceived;
+  if (lastJoinReceived > 0 && timeSinceLastJoin < STABILIZATION_MS) {
+    logger.debug(`P2P: Sync skipped (stabilization: ${Math.round((STABILIZATION_MS - timeSinceLastJoin) / 1000)}s remaining)`);
+    return { success: true, added: 0 };
+  }
+  
   // Trouver l'initiateur (premier peer, généralement nommé "initiator" ou le premier dans la liste)
   const initiatorPeer = meshConfig.peers.find(p => p.name === 'initiator') || meshConfig.peers[0];
   if (!initiatorPeer) {
@@ -1026,6 +1054,9 @@ export async function syncMeshPeersFromInitiator(): Promise<{ success: boolean; 
   }
   
   // ===== Synchroniser la config Corosync depuis l'initiateur =====
+  // NOTE: On NE RESTART PAS Corosync automatiquement.
+  // Corosync converge naturellement via ses propres mécanismes.
+  // Un restart automatique cause des cascades de déconnexions.
   try {
     const corosyncResult = await fetchCorosyncNodesFromPeer(initiatorMeshIp, meshConfig.authKey);
     if (corosyncResult.success && corosyncResult.nodes) {
@@ -1033,34 +1064,17 @@ export async function syncMeshPeersFromInitiator(): Promise<{ success: boolean; 
       
       // Si l'initiateur a plus de nodes, mettre à jour la config
       if (corosyncResult.nodes.length > localNodes.length) {
-        logger.info(`P2P: Initiator has ${corosyncResult.nodes.length} corosync nodes, local has ${localNodes.length}. Syncing...`);
+        logger.info(`P2P: Initiator has ${corosyncResult.nodes.length} corosync nodes, local has ${localNodes.length}. Syncing config...`);
         updateCorosyncForMesh(meshConfig.clusterName, corosyncResult.nodes, meshConfig.corosyncPort || 5405);
-      }
-      
-      // Vérifier si Corosync voit moins de membres que la config
-      // Si oui, redémarrer pour appliquer la nodelist complète
-      // Cooldown de 60s pour éviter les boucles de restart (sfha dépend de corosync via systemd)
-      try {
-        // Compter les membres par leur IP (chaque membre a une entrée .ip)
-        const cmapOutput = execSync('corosync-cmapctl | grep "runtime.members" | grep -c "\\.ip"', { encoding: 'utf-8', timeout: 5000 }).trim();
-        const activeMembers = parseInt(cmapOutput, 10) || 1;
-        const configNodes = Math.max(corosyncResult.nodes.length, localNodes.length);
         
-        if (activeMembers < configNodes) {
-          const now = Date.now();
-          const COOLDOWN_MS = 60000; // 60 secondes entre restarts
-          
-          if (now - lastCorosyncRestart < COOLDOWN_MS) {
-            logger.debug(`P2P: Corosync restart skipped (cooldown ${Math.round((COOLDOWN_MS - (now - lastCorosyncRestart)) / 1000)}s remaining)`);
-          } else {
-            logger.info(`P2P: Corosync sees ${activeMembers} members but config has ${configNodes} nodes. Restarting...`);
-            lastCorosyncRestart = now;
-            execSync('systemctl restart corosync', { stdio: 'pipe', timeout: 10000 });
-            logger.info(`P2P: Corosync restarted`);
-          }
+        // Soft reload - ne PAS restart Corosync
+        // Le reload via cfgtool suffit pour que Corosync voie les nouveaux nœuds
+        try {
+          execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe', timeout: 5000 });
+          logger.debug('P2P: Corosync config reloaded (soft)');
+        } catch {
+          // Ignorer les erreurs de reload - Corosync convergera naturellement
         }
-      } catch (restartErr: any) {
-        logger.debug(`P2P: Corosync check/restart failed: ${restartErr.message}`);
       }
     }
   } catch (corosyncErr: any) {
@@ -1071,10 +1085,220 @@ export async function syncMeshPeersFromInitiator(): Promise<{ success: boolean; 
 }
 
 // ============================================
-// Cooldown pour éviter les restarts en boucle
+// Stabilisation après join
 // ============================================
 
-let lastCorosyncRestart = 0;
+// Timestamp du dernier join reçu - utilisé pour éviter les sync trop rapides
+let lastJoinReceived = 0;
+
+// ============================================
+// Propagation manuelle (sfha propagate)
+// ============================================
+
+export interface PropagateResult {
+  success: boolean;
+  total: number;
+  succeeded: number;
+  failed: number;
+  error?: string;
+  errors?: Array<{ node: string; error: string }>;
+}
+
+/**
+ * Découvre les peers WireGuard connectés via `wg show`
+ */
+function discoverWireGuardPeers(): Array<{ publicKey: string; endpoint: string; allowedIps: string; lastHandshake: number }> {
+  try {
+    const output = execSync('wg show wg-sfha', { encoding: 'utf-8', timeout: 5000 });
+    const peers: Array<{ publicKey: string; endpoint: string; allowedIps: string; lastHandshake: number }> = [];
+    
+    const lines = output.split('\n');
+    let currentPeer: any = null;
+    
+    for (const line of lines) {
+      if (line.startsWith('peer:')) {
+        if (currentPeer) peers.push(currentPeer);
+        currentPeer = { publicKey: line.split(':')[1].trim(), endpoint: '', allowedIps: '', lastHandshake: 0 };
+      } else if (currentPeer && line.includes('endpoint:')) {
+        currentPeer.endpoint = line.split(':').slice(1).join(':').trim();
+      } else if (currentPeer && line.includes('allowed ips:')) {
+        currentPeer.allowedIps = line.split(':')[1].trim();
+      } else if (currentPeer && line.includes('latest handshake:')) {
+        // Parse "X minutes, Y seconds ago" ou "X seconds ago"
+        currentPeer.lastHandshake = Date.now(); // Simplifié: présence = récent
+      }
+    }
+    if (currentPeer) peers.push(currentPeer);
+    
+    return peers;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Propage la configuration complète (WireGuard + Corosync) à tous les peers.
+ * À exécuter sur le leader/initiateur uniquement.
+ * 
+ * NOUVEAU FLOW:
+ * 1. Découvre les peers via `wg show` (ceux qui ont fait joinSimple)
+ * 2. Génère la config full-mesh WireGuard pour tous
+ * 3. Génère la config Corosync avec tous les nœuds
+ * 4. Pousse les configs à chaque peer via /full-config
+ * 5. Démarre les services sur chaque peer
+ * 
+ * @param timeoutMs Timeout par nœud (défaut: 10s)
+ * @returns Résultat de la propagation
+ */
+export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Promise<PropagateResult> {
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  
+  if (!meshConfig) {
+    return { success: false, total: 0, succeeded: 0, failed: 0, error: 'Aucun mesh configuré' };
+  }
+  
+  // 1. Découvrir les peers connectés via WireGuard
+  const discoveredPeers = discoverWireGuardPeers();
+  logger.info(`Découverte: ${discoveredPeers.length} peer(s) WireGuard connecté(s)`);
+  
+  if (discoveredPeers.length === 0) {
+    return { success: false, total: 0, succeeded: 0, failed: 0, error: 'Aucun peer WireGuard connecté. Les nœuds ont-ils fait "sfha join" ?' };
+  }
+  
+  // 2. Construire la liste complète des nœuds (moi + peers découverts)
+  const myMeshIp = meshConfig.meshIp.split('/')[0];
+  const myHostname = require('os').hostname();
+  
+  interface NodeInfo {
+    name: string;
+    publicKey: string;
+    endpoint: string;
+    meshIp: string;
+    nodeId: number;
+  }
+  
+  const allNodes: NodeInfo[] = [{
+    name: myHostname,
+    publicKey: meshConfig.publicKey,
+    endpoint: '', // Le leader n'a pas besoin d'endpoint pour lui-même
+    meshIp: myMeshIp,
+    nodeId: 1,
+  }];
+  
+  // Ajouter les peers découverts
+  let nodeId = 2;
+  for (const peer of discoveredPeers) {
+    const peerMeshIp = peer.allowedIps.split('/')[0];
+    allNodes.push({
+      name: `node-${nodeId}`, // Nom temporaire, sera mis à jour par le peer
+      publicKey: peer.publicKey,
+      endpoint: peer.endpoint,
+      meshIp: peerMeshIp,
+      nodeId: nodeId,
+    });
+    nodeId++;
+  }
+  
+  logger.info(`Cluster: ${allNodes.length} nœud(s) au total`);
+  
+  // 3. Générer la config Corosync
+  const corosyncNodes: MeshNode[] = allNodes.map(n => ({
+    name: n.name,
+    ip: n.meshIp,
+    nodeId: n.nodeId,
+  }));
+  
+  // Mettre à jour la config Corosync locale
+  updateCorosyncForMesh(meshConfig.clusterName, corosyncNodes, meshConfig.corosyncPort || 5405);
+  
+  // Démarrer Corosync localement si pas déjà fait
+  try {
+    execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
+    execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
+  } catch {}
+  
+  const errors: Array<{ node: string; error: string }> = [];
+  let succeeded = 0;
+  
+  // 4. Propager à chaque peer
+  for (const peer of discoveredPeers) {
+    const peerMeshIp = peer.allowedIps.split('/')[0];
+    const peerNodeId = allNodes.find(n => n.meshIp === peerMeshIp)?.nodeId || 0;
+    
+    logger.info(`Propagation vers ${peerMeshIp} (node-${peerNodeId})...`);
+    
+    try {
+      // Construire la liste des peers pour ce nœud (tous sauf lui-même)
+      const peersForThisNode = allNodes
+        .filter(n => n.meshIp !== peerMeshIp)
+        .map(n => ({
+          name: n.name,
+          publicKey: n.publicKey,
+          endpoint: n.endpoint || `${n.meshIp}:51820`,
+          meshIp: n.meshIp,
+        }));
+      
+      // Envoyer la config complète
+      const configPayload = {
+        authKey: meshConfig.authKey,
+        clusterName: meshConfig.clusterName,
+        corosyncPort: meshConfig.corosyncPort || 5405,
+        corosyncNodes: corosyncNodes,
+        wgPeers: peersForThisNode,
+        nodeId: peerNodeId,
+      };
+      
+      const result = await httpPost(peerMeshIp, 7777, '/full-config', configPayload, timeoutMs);
+      
+      if (result.success) {
+        logger.info(`  ✓ ${peerMeshIp} configuré`);
+        succeeded++;
+      } else {
+        logger.warn(`  ✗ ${peerMeshIp}: ${result.error}`);
+        errors.push({ node: peerMeshIp, error: result.error || 'Échec configuration' });
+      }
+      
+    } catch (err: any) {
+      logger.error(`  ✗ ${peerMeshIp}: ${err.message}`);
+      errors.push({ node: peerMeshIp, error: err.message });
+    }
+  }
+  
+  const total = discoveredPeers.length;
+  const failed = total - succeeded;
+  
+  // 5. Si TOUS les nœuds ont été configurés, envoyer /reload-services à TOUS
+  if (failed === 0 && succeeded > 0) {
+    logger.info(`Tous les nœuds configurés. Envoi du signal de reload...`);
+    
+    // D'abord restart Corosync localement (le leader)
+    try {
+      execSync('systemctl restart corosync 2>/dev/null || true', { stdio: 'pipe' });
+    } catch {}
+    
+    // Puis envoyer /reload-services à tous les peers
+    for (const peer of discoveredPeers) {
+      const peerMeshIp = peer.allowedIps.split('/')[0];
+      try {
+        await httpPost(peerMeshIp, 7777, '/reload-services', { authKey: meshConfig.authKey }, timeoutMs);
+        logger.info(`  ✓ ${peerMeshIp} reload OK`);
+      } catch (err: any) {
+        logger.warn(`  ⚠ ${peerMeshIp} reload failed: ${err.message}`);
+      }
+    }
+    
+    logger.info(`Signal de reload envoyé à tous les nœuds.`);
+  }
+  
+  return {
+    success: failed === 0,
+    total,
+    succeeded,
+    failed,
+    errors: errors.length > 0 ? errors : undefined,
+  };
+}
 
 // ============================================
 // Singleton
