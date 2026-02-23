@@ -11,14 +11,14 @@
 # sfha — Haute Disponibilité légère pour Linux
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.58-green.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.0.69-green.svg)](package.json)
 [![Debian](https://img.shields.io/badge/Debian-11%2B-red.svg)](https://www.debian.org/)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%2B-orange.svg)](https://ubuntu.com/)
 [![Made in France](https://img.shields.io/badge/Made%20in-France%20🇫🇷-blue.svg)](#)
 
 **sfha** (Simple Fast High Availability) est un système de haute disponibilité léger et moderne, conçu comme alternative minimaliste à Pacemaker.
 
-🚀 **~2500 lignes de code** | 📦 **27MB standalone** | ⚡ **Zéro I/O disque** | 🇫🇷 **CLI en français**
+🚀 **~12K lignes TypeScript** | 📦 **15MB standalone** | ⚡ **Zéro I/O disque** | 🇫🇷 **CLI en français**
 
 ---
 
@@ -26,14 +26,15 @@
 
 | Fonctionnalité | Description |
 |----------------|-------------|
-| 🔄 **VIP flottante** | Failover automatique des adresses IP virtuelles |
+| 🔄 **VIP flottante** | Failover automatique des adresses IP virtuelles (~5s) |
 | 🌐 **Mesh WireGuard** | Réseau chiffré intégré avec `init`/`join` simple |
-| 🔫 **STONITH Proxmox** | Fencing automatique via API Proxmox (VMs & containers) |
-| 🛡️ **Détection conflits IP** | Vérifie les collisions avant activation |
+| 🔫 **STONITH** | Fencing via API Proxmox ou Webhook (extensible) |
+| 🛡️ **Détection conflits IP** | Vérifie les collisions avant activation (arping) |
 | 💓 **Health checks** | HTTP, TCP, systemd avec hystérésis configurable |
 | 🤝 **Quorum Corosync** | Intégration native avec votequorum |
+| 🔁 **Propagation auto** | Config VIP/services synchronisée sur tous les nœuds |
 | 🇫🇷 **Multilingue** | Français par défaut, `--lang=en` disponible |
-| 📊 **CLI complète** | Status, resources, failover, standby... |
+| 📊 **CLI complète** | Status, resources, failover, standby, propagate... |
 
 ---
 
@@ -41,10 +42,10 @@
 
 ```bash
 # Télécharger le .deb depuis les releases GitHub
-wget https://github.com/anhost77/sfha/releases/latest/download/sfha_1.0.58_amd64.deb
+wget https://github.com/anhost77/sfha/releases/latest/download/sfha_1.0.69_amd64.deb
 
 # Installer (aucune dépendance requise sauf corosync)
-sudo dpkg -i sfha_1.0.58_amd64.deb
+sudo dpkg -i sfha_1.0.69_amd64.deb
 
 # Vérifier l'installation
 sfha --version
@@ -294,19 +295,20 @@ logging:
 
 ---
 
-## 🆚 Comparaison
+## 🆚 Positionnement
 
-| Critère | Pacemaker | keepalived | sfha |
-|---------|-----------|------------|------|
-| **Lignes de code** | ~500K | ~50K | ~2.5K |
-| **Taille installée** | ~50 MB | ~500 KB | ~27 MB (standalone) |
-| **I/O disque** | Élevé (CIB XML) | Faible | **Zéro** |
-| **Configuration** | XML complexe | Config texte | **YAML simple** |
-| **STONITH** | 100+ agents | ❌ | Proxmox (extensible) |
-| **Mesh intégré** | ❌ | ❌ | **WireGuard** |
-| **Health checks** | Via agents | VRRP scripts | **HTTP/TCP/systemd** |
-| **Courbe d'apprentissage** | Très raide | Moyenne | **Douce** |
-| **Cas d'usage idéal** | Clusters complexes | VIP simple | **Clusters simples** |
+sfha se positionne entre keepalived (trop simple) et Pacemaker (trop complexe) :
+
+| Critère | keepalived | sfha | Pacemaker |
+|---------|------------|------|-----------|
+| **Complexité** | Minimale | Modérée | Élevée |
+| **Configuration** | Config texte | **YAML simple** | XML complexe |
+| **I/O disque** | Faible | **Zéro** | Élevé (CIB XML) |
+| **STONITH/Fencing** | ❌ | Proxmox + Webhook | 100+ agents |
+| **Mesh chiffré** | ❌ | **WireGuard intégré** | ❌ |
+| **Health checks** | VRRP scripts | **HTTP/TCP/systemd** | Via agents |
+| **Propagation auto** | ❌ | **Oui (reload)** | ❌ |
+| **Cas d'usage** | VIP simple | 2-10 nœuds, VIPs + services | Clusters complexes |
 
 ---
 
@@ -362,16 +364,17 @@ Vérifier : `sfha health`
 
 ### sfha est fait pour vous si...
 
-✅ Vous gérez 2-5 nœuds avec quelques VIPs et services  
+✅ Vous gérez 2-10 nœuds avec VIPs et services  
 ✅ Vous voulez une config YAML lisible en 5 minutes  
 ✅ Vous avez Proxmox et voulez du STONITH simple  
-✅ Vous voulez un mesh chiffré sans toucher à Corosync  
+✅ Vous voulez un mesh chiffré auto-configuré  
+✅ Vous voulez une propagation automatique des configs  
 
 ### sfha n'est PAS fait pour vous si...
 
 ❌ Vous avez besoin de ressources clonées/multi-state  
-❌ Vous gérez 50+ nœuds  
-❌ Vous avez besoin de fence-agents exotiques (IPMI, iLO, DRAC...)  
+❌ Vous gérez 50+ nœuds en production  
+❌ Vous avez besoin de fence-agents matériels (IPMI, iLO, DRAC...)  
 
 ---
 
@@ -414,8 +417,7 @@ pnpm test
 
 | Script | Taille | Node.js requis |
 |--------|--------|----------------|
-| `build-deb-standalone.sh` | ~27MB | ❌ Non (embarqué) |
-| `build-deb-nodejs.sh` | ~3.6MB | ✅ Oui (dépendance) |
+| `build-deb.sh` | ~15MB | ❌ Non (binaire standalone) |
 
 ---
 
