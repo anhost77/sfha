@@ -5,6 +5,18 @@ Toutes les modifications notables de ce projet seront documentées dans ce fichi
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Versionnement Sémantique](https://semver.org/lang/fr/).
 
+## [1.0.70] - 2026-02-24
+
+### Ajouté
+
+- **Commandes VIP CLI** : gestion des VIPs sans éditer manuellement le YAML
+  - `sfha vip list` : liste les VIPs configurées
+  - `sfha vip add <name> <ip/cidr> [interface]` : ajoute une VIP
+  - `sfha vip remove <name>` : supprime une VIP
+  - Auto-reload après modification (désactivable avec `--no-reload`)
+
+---
+
 ## [1.0.69] - 2026-02-24
 
 ### Ajouté

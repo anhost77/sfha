@@ -4,7 +4,51 @@
 
 ### Ajouter une VIP
 
-1. **Éditer la config sur le leader** :
+```bash
+# Méthode recommandée (v1.0.70+)
+sudo sfha vip add api 192.168.1.201/24 eth0
+```
+
+C'est tout ! La VIP est :
+- ✅ Ajoutée à la config
+- ✅ Activée sur le leader (reload automatique)
+- ✅ Propagée automatiquement à tous les nœuds
+
+### Lister les VIPs
+
+```bash
+sfha vip list
+
+# Sortie :
+# VIPs configurées:
+#   • web: 192.168.1.200/24 sur eth0
+#   • api: 192.168.1.201/24 sur eth0
+```
+
+### Supprimer une VIP
+
+```bash
+sudo sfha vip remove api
+```
+
+La VIP sera désactivée sur le leader et retirée de tous les nœuds.
+
+### Options
+
+```bash
+# Ajouter sans recharger (utile pour batch)
+sudo sfha vip add vip1 192.168.1.201/24 eth0 --no-reload
+sudo sfha vip add vip2 192.168.1.202/24 eth0 --no-reload
+sudo sfha reload  # Recharger une seule fois à la fin
+
+# Sortie JSON
+sfha vip list --json
+```
+
+### Méthode alternative (édition manuelle)
+
+Si vous préférez éditer le YAML directement :
+
 ```bash
 sudo nano /etc/sfha/config.yml
 ```
@@ -15,39 +59,11 @@ vips:
     ip: 192.168.1.200
     cidr: 24
     interface: eth0
-  - name: api          # ← Nouvelle VIP
-    ip: 192.168.1.201
-    cidr: 24
-    interface: eth0
 ```
 
-2. **Recharger la config** :
 ```bash
 sudo sfha reload
 ```
-
-C'est tout ! La VIP est :
-- ✅ Activée sur le leader
-- ✅ Propagée automatiquement à tous les nœuds
-
-### Vérifier les VIPs
-
-```bash
-# Sur n'importe quel nœud
-sfha resources
-
-# Sortie :
-# VIPs:
-#   ● actif web: 192.168.1.200/24 sur eth0
-#   ● actif api: 192.168.1.201/24 sur eth0
-```
-
-### Supprimer une VIP
-
-1. Éditer `/etc/sfha/config.yml` et retirer la VIP
-2. `sudo sfha reload`
-
-La VIP sera désactivée sur le leader et retirée de tous les nœuds.
 
 ---
 
