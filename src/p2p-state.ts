@@ -15,7 +15,7 @@
 
 import http, { createServer, IncomingMessage, ServerResponse, Server } from 'http';
 import os from 'os';
-import { existsSync, writeFileSync } from 'fs';
+import { existsSync, writeFileSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { getClusterNodes } from './corosync.js';
 import { logger } from './utils/logger.js';
@@ -23,6 +23,8 @@ import { getMeshManager } from './mesh/manager.js';
 import { addPeerToState } from './cluster-state.js';
 import { isIpAuthorized, authorizePermanently, sendKnock } from './knock.js';
 import { getCorosyncNodes, updateCorosyncForMesh, reloadCorosync, MeshNode } from './mesh/corosync-mesh.js';
+import { loadConfig } from './config.js';
+import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 
 // ============================================
 // Types
@@ -437,6 +439,9 @@ export class P2PStateManager {
               corosyncNodes: MeshNode[];
               wgPeers: Array<{ name: string; publicKey: string; endpoint: string; meshIp: string }>;
               nodeId: number;
+              vips?: Array<{ name: string; ip: string; cidr: number; interface: string }>;
+              services?: Array<any>;
+              constraints?: Array<any>;
             };
             
             const mesh = getMeshManager();
@@ -476,27 +481,46 @@ export class P2PStateManager {
               }
             }
             
-            // 3. Créer le fichier config.yml si absent
+            // 3. Créer/mettre à jour le fichier config.yml
             const configPath = '/etc/sfha/config.yml';
             const hostname = os.hostname();
-            if (!existsSync(configPath)) {
-              const configContent = `# Configuration sfha - générée par sfha propagate
+            
+            // Générer les VIPs en YAML
+            let vipsYaml = '';
+            if (data.vips && data.vips.length > 0) {
+              vipsYaml = data.vips.map(v => 
+                `  - name: ${v.name}\n    ip: ${v.ip}\n    cidr: ${v.cidr}\n    interface: ${v.interface}`
+              ).join('\n');
+            }
+            
+            // Générer les services en YAML  
+            let servicesYaml = '';
+            if (data.services && data.services.length > 0) {
+              // Pour l'instant on stringify basiquement
+              servicesYaml = data.services.map((s: any) => {
+                let yaml = `  - name: ${s.name}\n    type: ${s.type || 'systemd'}`;
+                if (s.unit) yaml += `\n    unit: ${s.unit}`;
+                return yaml;
+              }).join('\n');
+            }
+            
+            // Toujours régénérer la config pour avoir les VIPs à jour
+            const configContent = `# Configuration sfha - générée par sfha propagate
 cluster:
   name: ${data.clusterName}
   quorum_required: true
   failover_delay_ms: 3000
   poll_interval_ms: 2000
-
 node:
   name: ${hostname}
   priority: ${100 - data.nodeId * 10}
-
-vips: []
-services: []
+vips:
+${vipsYaml || '  []'}
+services:
+${servicesYaml || '  []'}
 `;
-              writeFileSync(configPath, configContent);
-              logger.info(`P2P: Created config.yml for ${hostname}`);
-            }
+            writeFileSync(configPath, configContent);
+            logger.info(`P2P: Config.yml updated for ${hostname} with ${data.vips?.length || 0} VIPs`)
             
             // 4. NE PAS démarrer Corosync maintenant - attendre que TOUS les nœuds soient configurés
             // Le leader enverra /reload-services quand tout sera prêt
@@ -557,6 +581,73 @@ services: []
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, message: 'Services restarted' }));
           } catch (err: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          }
+        });
+        return;
+      }
+      
+      // ===== POST /sync-vips =====
+      // Synchronise les VIPs depuis le leader vers ce nœud
+      if (req.method === 'POST' && req.url === '/sync-vips') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body) as { 
+              authKey?: string;
+              vips: Array<{ name: string; ip: string; cidr: number; interface: string }>;
+            };
+            
+            const mesh = getMeshManager();
+            const meshConfig = mesh.getConfig();
+            
+            if (!meshConfig) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+              return;
+            }
+            
+            if (!data.authKey || data.authKey !== meshConfig.authKey) {
+              res.writeHead(404);
+              res.end('Not Found');
+              return;
+            }
+            
+            logger.info(`P2P: Syncing ${data.vips.length} VIPs from leader`);
+            
+            // Read current config
+            const configPath = '/etc/sfha/config.yml';
+            if (!existsSync(configPath)) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Config file not found' }));
+              return;
+            }
+            
+            const configContent = readFileSync(configPath, 'utf-8');
+            const config = yamlParse(configContent);
+            
+            // Update vips
+            config.vips = data.vips;
+            
+            // Write back
+            writeFileSync(configPath, yamlStringify(config, { indent: 2 }));
+            logger.info(`P2P: VIPs synced, reloading sfha...`);
+            
+            // Reload sfha
+            try {
+              execSync('sfha reload', { stdio: 'pipe' });
+            } catch {
+              // Ignore reload errors
+            }
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: `Synced ${data.vips.length} VIPs` }));
+          } catch (err: any) {
+            logger.error(`P2P: Error syncing VIPs: ${err.message}`);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, error: err.message }));
           }
@@ -1247,6 +1338,9 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Prom
           meshIp: n.meshIp,
         }));
       
+      // Charger la config sfha locale pour récupérer VIPs, services, constraints
+      const sfhaConfig = loadConfig('/etc/sfha/config.yml');
+      
       // Envoyer la config complète
       const configPayload = {
         authKey: meshConfig.authKey,
@@ -1255,6 +1349,10 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Prom
         corosyncNodes: corosyncNodes,
         wgPeers: peersForThisNode,
         nodeId: peerNodeId,
+        // Inclure VIPs, services, constraints du leader
+        vips: sfhaConfig.vips || [],
+        services: sfhaConfig.services || [],
+        constraints: sfhaConfig.constraints || [],
       };
       
       const result = await httpPost(peerMeshIp, 7777, '/full-config', configPayload, timeoutMs);

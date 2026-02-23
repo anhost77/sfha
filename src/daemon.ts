@@ -16,7 +16,7 @@ import { t, initI18n } from './i18n.js';
 import { logger, setLogLevel, createSimpleLogger } from './utils/logger.js';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { getMeshManager } from './mesh/index.js';
-import { P2PStateManager, initP2PStateManager, syncMeshPeersFromInitiator } from './p2p-state.js';
+import { P2PStateManager, initP2PStateManager, syncMeshPeersFromInitiator, propagateConfigToAllPeers } from './p2p-state.js';
 import { startKnockServer, stopKnockServer, authorizePermanently } from './knock.js';
 
 // ============================================
@@ -73,7 +73,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.60';
+const VERSION = '1.0.69';
 
 // ============================================
 // Daemon
@@ -173,6 +173,25 @@ export class SfhaDaemon extends EventEmitter {
         this.config.constraints,
         this.log
       );
+      
+      // Si leader, activer les nouvelles VIPs et propager aux autres nœuds
+      if (this.isLeader && this.config.vips.length > 0) {
+        logger.info('Activation des VIPs après rechargement...');
+        activateAllVips(this.config.vips, this.log);
+        
+        // Propager automatiquement la config aux autres nœuds (timeout 30s car les peers peuvent être occupés)
+        logger.info('Propagation automatique de la configuration...');
+        propagateConfigToAllPeers(30000).then(result => {
+          if (result.success) {
+            logger.info(`Propagation OK: ${result.succeeded}/${result.total} nœuds mis à jour`);
+          } else if (result.total > 0) {
+            logger.warn(`Propagation partielle: ${result.succeeded}/${result.total} (${result.error || 'erreurs'})`);
+          }
+          // Si total=0, pas de peers, on ignore silencieusement
+        }).catch(err => {
+          logger.warn(`Propagation échouée: ${err.message}`);
+        });
+      }
     } else {
       this.config = newConfig;
     }
@@ -576,6 +595,17 @@ export class SfhaDaemon extends EventEmitter {
     const result = this.electionManager.checkElection(p2pStandbyNodes);
     if (result) {
       logger.info(`checkElection: résultat = leader=${result.leaderName}, isLocalLeader=${result.isLocalLeader}`);
+      
+      // Si on est élu leader mais pas encore marqué comme tel, activer les ressources
+      if (result.isLocalLeader && !this.isLeader) {
+        logger.info('checkElection: devenu leader, activation des ressources');
+        this.handleLeaderChange(true, result.leaderName);
+      }
+      // Si on n'est plus leader mais encore marqué comme tel, désactiver
+      else if (!result.isLocalLeader && this.isLeader) {
+        logger.info('checkElection: perte du leadership, désactivation des ressources');
+        this.handleLeaderChange(false, result.leaderName);
+      }
     }
   }
 
@@ -659,12 +689,15 @@ export class SfhaDaemon extends EventEmitter {
     
     if (isLeader && !wasLeader) {
       // Devenu leader - vérifier le quorum avant d'activer
+      logger.info(`handleLeaderChange: devenu leader, vérification quorum...`);
       const quorum = getQuorumStatus();
+      logger.info(`handleLeaderChange: quorum.quorate=${quorum.quorate}, config.quorumRequired=${this.config?.cluster.quorumRequired}`);
       if (!quorum.quorate && this.config?.cluster.quorumRequired) {
         logger.warn('Élu leader mais pas de quorum - ressources non activées');
         this.isLeader = false;
         return;
       }
+      logger.info('handleLeaderChange: activation des ressources...');
       this.activateResources();
       // Mettre à jour le P2P state
       if (this.p2pStateManager) {
