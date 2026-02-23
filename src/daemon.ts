@@ -73,7 +73,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.42';
+const VERSION = '1.0.53';
 
 // ============================================
 // Daemon
@@ -101,6 +101,8 @@ export class SfhaDaemon extends EventEmitter {
   private deadNodePolls: Map<string, number> = new Map();
   // Timers de délai avant fencing (pour annuler si le nœud revient)
   private pendingFenceTimers: Map<string, NodeJS.Timeout> = new Map();
+  // Intervalle de synchronisation périodique des peers mesh
+  private meshSyncInterval: NodeJS.Timeout | null = null;
   
   /** Fonction de log pour compatibilité avec les sous-modules */
   private log: (msg: string) => void;
@@ -212,11 +214,17 @@ export class SfhaDaemon extends EventEmitter {
     const meshManager = getMeshManager();
     const meshConfig = meshManager.getConfig();
     if (meshConfig?.meshNetwork) {
-      // Autoriser les IPs des peers existants
+      // Autoriser les IPs publiques ET mesh des peers existants
+      // Les IPs mesh sont nécessaires car les communications P2P passent par WireGuard
       for (const peer of meshConfig.peers || []) {
         if (peer.endpoint) {
           const peerIp = peer.endpoint.split(':')[0];
           authorizePermanently(peerIp);
+        }
+        // Autoriser aussi l'IP mesh
+        if (peer.allowedIps) {
+          const meshIp = peer.allowedIps.split('/')[0];
+          authorizePermanently(meshIp);
         }
       }
       // Démarrer le serveur de knock pour accepter les nouveaux nœuds
@@ -243,6 +251,13 @@ export class SfhaDaemon extends EventEmitter {
     setTimeout(() => {
       this.syncPeersFromInitiator();
     }, 3000);
+    
+    // Synchro périodique des peers (toutes les 30 secondes)
+    // Permet de récupérer les peers manquants si un join a échoué partiellement
+    // ou si des nodes ont été ajoutés après notre démarrage
+    this.meshSyncInterval = setInterval(() => {
+      this.syncPeersFromInitiator();
+    }, 30000);
     
     // Attendre le quorum si requis
     if (this.config!.cluster.quorumRequired) {
@@ -326,6 +341,12 @@ export class SfhaDaemon extends EventEmitter {
     
     // Arrêter le P2P state manager
     this.p2pStateManager?.stop();
+    
+    // Arrêter la synchro périodique des peers
+    if (this.meshSyncInterval) {
+      clearInterval(this.meshSyncInterval);
+      this.meshSyncInterval = null;
+    }
     
     // Arrêter le serveur de knock
     stopKnockServer();

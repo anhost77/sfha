@@ -14,6 +14,7 @@
  */
 
 import http, { createServer, IncomingMessage, ServerResponse, Server } from 'http';
+import { execSync } from 'child_process';
 import { getClusterNodes } from './corosync.js';
 import { logger } from './utils/logger.js';
 import { getMeshManager } from './mesh/manager.js';
@@ -236,11 +237,14 @@ export class P2PStateManager {
             if (result.success) {
               logger.info(`P2P: Added peer ${peerData.name} (${peerData.meshIp}) via API`);
               
-              // Autoriser l'IP de ce peer de façon permanente
+              // Autoriser l'IP publique ET mesh de ce peer de façon permanente
+              // L'IP mesh est nécessaire car les communications P2P passent par WireGuard
               if (peerData.endpoint) {
                 const peerIp = peerData.endpoint.split(':')[0];
                 authorizePermanently(peerIp);
               }
+              authorizePermanently(cleanMeshIp);
+              logger.debug(`P2P: Authorized IPs for ${peerData.name}: public=${peerData.endpoint?.split(':')[0]}, mesh=${cleanMeshIp}`);
               
               // ===== Propager le nouveau peer aux autres nœuds existants via WireGuard =====
               // Cela permet à node2 de connaître node3 quand node3 rejoint via node1
@@ -251,30 +255,42 @@ export class P2PStateManager {
                   // Ne pas propager au peer qu'on vient d'ajouter
                   if (existingPeer.publicKey === peerData.publicKey) continue;
                   
-                  // Utiliser l'IP mesh du peer (le serveur P2P écoute sur l'IP mesh, pas l'IP publique)
+                  // Utiliser l'IP mesh du peer ET l'IP publique pour le fallback
                   const existingPeerMeshIp = existingPeer.allowedIps?.split('/')[0];
-                  const existingPeerEndpoint = existingPeer.endpoint?.split(':')[0];
+                  const existingPeerPublicIp = existingPeer.endpoint?.split(':')[0];
                   if (!existingPeerMeshIp) continue;
                   
                   try {
-                    // Knock pour ouvrir le port (sur l'IP publique)
-                    if (existingPeerEndpoint) {
-                      await sendKnock(existingPeerEndpoint, meshConfig.authKey);
+                    // ===== ÉTAPE 1: Attendre que le handshake WireGuard soit établi =====
+                    // Sans handshake, les paquets vers l'IP mesh ne passent pas
+                    logger.info(`P2P: Waiting for WireGuard handshake with ${existingPeer.name}...`);
+                    const handshakeOk = await waitForWgHandshake(existingPeer.publicKey, 15000, 500);
+                    if (!handshakeOk) {
+                      logger.warn(`P2P: No WireGuard handshake with ${existingPeer.name}, will use public IP fallback`);
+                    }
+                    
+                    // ===== ÉTAPE 2: Knock pour ouvrir le port =====
+                    if (existingPeerPublicIp) {
+                      await sendKnock(existingPeerPublicIp, meshConfig.authKey);
                       await new Promise(resolve => setTimeout(resolve, 300));
                     }
                     
-                    // Propager le nouveau peer via POST /add-peer (sur l'IP mesh via WireGuard)
+                    // ===== ÉTAPE 3: Propager via le mesh (avec fallback public) =====
                     const propagationData = {
                       name: peerData.name,
                       publicKey: peerData.publicKey,
                       endpoint: peerData.endpoint,
                       meshIp: peerData.meshIp,
                       authKey: meshConfig.authKey,
-                      propagated: true, // Marquer comme propagation pour éviter les boucles
+                      propagated: true,
                     };
                     
-                    await propagatePeerToNode(existingPeerMeshIp, propagationData);
-                    logger.info(`P2P: Propagated ${peerData.name} to ${existingPeer.name}`);
+                    const result = await propagatePeerToNode(existingPeerMeshIp, existingPeerPublicIp, propagationData);
+                    if (result.success) {
+                      logger.info(`P2P: Propagated ${peerData.name} to ${existingPeer.name}`);
+                    } else {
+                      logger.warn(`P2P: Failed to propagate ${peerData.name} to ${existingPeer.name}: ${result.error}`);
+                    }
                   } catch (err: any) {
                     logger.warn(`P2P: Failed to propagate ${peerData.name} to ${existingPeer.name}: ${err.message}`);
                   }
@@ -285,11 +301,14 @@ export class P2PStateManager {
               // Cela permet à node3 de connaître node2 quand node3 rejoint via node1
               if (!peerData.propagated && meshConfig.peers.length > 1) {
                 const newNodeMeshIp = cleanMeshIp;
-                const newNodeEndpoint = peerData.endpoint?.split(':')[0];
+                const newNodePublicIp = peerData.endpoint?.split(':')[0];
                 
-                // Attendre que le daemon du nouveau node soit démarré (5 secondes)
-                // Le daemon met ~3-4 secondes à démarrer complètement
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                // ===== ÉTAPE 1: Attendre que le handshake WireGuard soit établi avec le nouveau node =====
+                logger.info(`P2P: Waiting for WireGuard handshake with new node ${peerData.name}...`);
+                const handshakeOk = await waitForWgHandshake(peerData.publicKey, 30000, 500);
+                if (!handshakeOk) {
+                  logger.warn(`P2P: No WireGuard handshake with new node ${peerData.name}, will use public IP fallback`);
+                }
                 
                 logger.info(`P2P: Sending ${meshConfig.peers.length - 1} existing peers to new node ${peerData.name}`);
                 
@@ -298,13 +317,13 @@ export class P2PStateManager {
                   if (existingPeer.publicKey === peerData.publicKey) continue;
                   
                   try {
-                    // Knock le nouveau node pour ouvrir son port
-                    if (newNodeEndpoint) {
-                      await sendKnock(newNodeEndpoint, meshConfig.authKey);
+                    // ===== ÉTAPE 2: Knock pour ouvrir le port =====
+                    if (newNodePublicIp) {
+                      await sendKnock(newNodePublicIp, meshConfig.authKey);
                       await new Promise(resolve => setTimeout(resolve, 300));
                     }
                     
-                    // Envoyer le peer existant au nouveau node
+                    // ===== ÉTAPE 3: Envoyer le peer existant (avec fallback public) =====
                     const existingPeerMeshIp = existingPeer.allowedIps?.split('/')[0] || '';
                     const reverseData = {
                       name: existingPeer.name,
@@ -315,49 +334,52 @@ export class P2PStateManager {
                       propagated: true,
                     };
                     
-                    await propagatePeerToNode(newNodeMeshIp, reverseData);
-                    logger.info(`P2P: Sent existing peer ${existingPeer.name} to new node ${peerData.name}`);
+                    const result = await propagatePeerToNode(newNodeMeshIp, newNodePublicIp, reverseData);
+                    if (result.success) {
+                      logger.info(`P2P: Sent existing peer ${existingPeer.name} to new node ${peerData.name}`);
+                    } else {
+                      logger.warn(`P2P: Failed to send ${existingPeer.name} to ${peerData.name}: ${result.error}`);
+                    }
                   } catch (err: any) {
                     logger.warn(`P2P: Failed to send ${existingPeer.name} to ${peerData.name}: ${err.message}`);
                   }
                 }
               }
               
-              // ===== Synchroniser la config Corosync sur TOUS les autres nœuds =====
-              // L'initiateur (ce nœud) a la config complète, on la pousse aux autres
+              // ===== Synchroniser la config Corosync sur TOUS les nœuds (y compris le nouveau) =====
+              // L'initiateur (ce nœud) a la config complète, on la pousse à TOUS les peers
+              // Le nouveau nœud a besoin de la config mise à jour car il a peut-être fetch
+              // une version incomplète avant qu'on l'ajoute à notre liste
               const corosyncNodes = getCorosyncNodes();
               if (corosyncNodes.length > 1 && meshConfig.peers.length > 0) {
-                const syncPromises: Promise<void>[] = [];
+                logger.info(`P2P: Syncing corosync config (${corosyncNodes.length} nodes) to ${meshConfig.peers.length} peers`);
                 
                 for (const peer of meshConfig.peers) {
                   const peerMeshIp = peer.allowedIps.split('/')[0];
                   const peerEndpoint = peer.endpoint?.split(':')[0];
+                  const isNewNode = peerMeshIp === cleanMeshIp;
                   
-                  // Ne pas se synchroniser avec soi-même ni avec le nouveau nœud (il va fetch depuis nous)
-                  if (peerMeshIp === cleanMeshIp) continue;
-                  
-                  syncPromises.push((async () => {
-                    try {
-                      // Knock pour ouvrir le port si nécessaire
-                      if (peerEndpoint) {
-                        await sendKnock(peerEndpoint, meshConfig.authKey);
-                        await new Promise(resolve => setTimeout(resolve, 300));
-                      }
-                      
-                      // Appeler sync-corosync sur ce peer
-                      await syncCorosyncToPeer(peerMeshIp, corosyncNodes, meshConfig.authKey, meshConfig.clusterName);
-                      logger.info(`P2P: Synced corosync config to ${peer.name}`);
-                    } catch (err: any) {
-                      logger.warn(`P2P: Failed to sync corosync to ${peer.name}: ${err.message}`);
+                  try {
+                    // ===== ÉTAPE 1: Attendre le handshake WireGuard =====
+                    const handshakeOk = await waitForWgHandshake(peer.publicKey, 15000, 500);
+                    if (!handshakeOk) {
+                      logger.warn(`P2P: No WireGuard handshake with ${peer.name}, skipping corosync sync`);
+                      continue;
                     }
-                  })());
+                    
+                    // ===== ÉTAPE 2: Knock pour ouvrir le port =====
+                    if (peerEndpoint) {
+                      await sendKnock(peerEndpoint, meshConfig.authKey);
+                      await new Promise(resolve => setTimeout(resolve, 300));
+                    }
+                    
+                    // ===== ÉTAPE 3: Synchro corosync =====
+                    await syncCorosyncToPeer(peerMeshIp, corosyncNodes, meshConfig.authKey, meshConfig.clusterName);
+                    logger.info(`P2P: Synced corosync config to ${peer.name}${isNewNode ? ' (new node)' : ''}`);
+                  } catch (err: any) {
+                    logger.warn(`P2P: Failed to sync corosync to ${peer.name}: ${err.message}`);
+                  }
                 }
-                
-                // Attendre toutes les synchros (avec timeout)
-                await Promise.race([
-                  Promise.allSettled(syncPromises),
-                  new Promise(resolve => setTimeout(resolve, 10000)),
-                ]);
               }
               
               res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -644,36 +666,84 @@ export class P2PStateManager {
 // Helper functions
 // ============================================
 
+
 /**
- * Propage un nouveau peer vers un nœud existant
- * Utilisé pour que tous les nœuds connaissent tous les peers WireGuard
+ * Attend que le handshake WireGuard soit établi avec un peer
+ * @param peerPublicKey Clé publique du peer
+ * @param maxWaitMs Temps max d'attente (défaut: 30s)
+ * @param pollIntervalMs Intervalle de polling (défaut: 500ms)
+ * @returns true si handshake établi, false si timeout
  */
-export function propagatePeerToNode(
-  nodeIp: string,
-  peerData: AddPeerRequest & { authKey: string; propagated: boolean }
-): Promise<{ success: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    const postData = JSON.stringify(peerData);
+export async function waitForWgHandshake(
+  peerPublicKey: string,
+  maxWaitMs: number = 30000,
+  pollIntervalMs: number = 500
+): Promise<boolean> {
+  const startTime = Date.now();
+  
+  while (Date.now() - startTime < maxWaitMs) {
+    try {
+      const output = execSync('wg show wg-sfha', { encoding: 'utf-8', timeout: 5000 });
+      
+      // Chercher le peer et vérifier s'il a un "latest handshake"
+      const lines = output.split('\n');
+      let foundPeer = false;
+      
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(`peer: ${peerPublicKey}`)) {
+          foundPeer = true;
+        }
+        if (foundPeer && lines[i].includes('latest handshake:')) {
+          logger.debug(`WireGuard handshake established with peer ${peerPublicKey.substring(0, 8)}...`);
+          return true;
+        }
+        // Reset si on trouve un autre peer
+        if (foundPeer && lines[i].includes('peer:') && !lines[i].includes(peerPublicKey)) {
+          foundPeer = false;
+        }
+      }
+    } catch {
+      // wg show failed, retry
+    }
     
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+  }
+  
+  logger.warn(`WireGuard handshake timeout for peer ${peerPublicKey.substring(0, 8)}... after ${maxWaitMs}ms`);
+  return false;
+}
+
+/**
+ * Helper HTTP POST avec timeout configurable
+ */
+function httpPost(
+  host: string,
+  port: number,
+  path: string,
+  data: object,
+  timeoutMs: number
+): Promise<{ success: boolean; error?: string; data?: any }> {
+  return new Promise((resolve) => {
+    const postData = JSON.stringify(data);
     const options = {
-      hostname: nodeIp,
-      port: 7777,
-      path: '/add-peer',
+      hostname: host,
+      port,
+      path,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
       },
-      timeout: 5000,
+      timeout: timeoutMs,
     };
 
     const req = http.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
+      let responseData = '';
+      res.on('data', (chunk) => { responseData += chunk; });
       res.on('end', () => {
         try {
-          const response = JSON.parse(data);
-          resolve({ success: response.success, error: response.error });
+          const response = JSON.parse(responseData);
+          resolve({ success: response.success, error: response.error, data: response });
         } catch {
           resolve({ success: false, error: 'Invalid response' });
         }
@@ -692,6 +762,35 @@ export function propagatePeerToNode(
     req.write(postData);
     req.end();
   });
+}
+
+/**
+ * Propage un nouveau peer vers un nœud existant
+ * Hybrid bootstrap: essaie d'abord l'IP mesh (2s), puis fallback sur IP publique (5s)
+ * Utilisé pour que tous les nœuds connaissent tous les peers WireGuard
+ */
+export async function propagatePeerToNode(
+  meshIp: string,
+  publicIp: string | undefined,
+  peerData: AddPeerRequest & { authKey: string; propagated: boolean }
+): Promise<{ success: boolean; error?: string }> {
+  // Étape 1: Essayer via l'IP mesh (timeout court car tunnel peut ne pas être établi)
+  const meshResult = await httpPost(meshIp, 7777, '/add-peer', peerData, 2000);
+  if (meshResult.success) {
+    return { success: true };
+  }
+
+  // Étape 2: Fallback sur IP publique si disponible
+  if (publicIp) {
+    logger.info(`P2P: Fallback to public IP ${publicIp} (mesh ${meshIp} failed: ${meshResult.error})`);
+    const publicResult = await httpPost(publicIp, 7777, '/add-peer', peerData, 5000);
+    if (publicResult.success) {
+      return { success: true };
+    }
+    return { success: false, error: `mesh: ${meshResult.error}, public: ${publicResult.error}` };
+  }
+
+  return { success: false, error: meshResult.error };
 }
 
 /**
@@ -926,8 +1025,56 @@ export async function syncMeshPeersFromInitiator(): Promise<{ success: boolean; 
     logger.info(`P2P: Synced ${added} missing peer(s) from initiator`);
   }
   
+  // ===== Synchroniser la config Corosync depuis l'initiateur =====
+  try {
+    const corosyncResult = await fetchCorosyncNodesFromPeer(initiatorMeshIp, meshConfig.authKey);
+    if (corosyncResult.success && corosyncResult.nodes) {
+      const localNodes = getCorosyncNodes();
+      
+      // Si l'initiateur a plus de nodes, mettre à jour la config
+      if (corosyncResult.nodes.length > localNodes.length) {
+        logger.info(`P2P: Initiator has ${corosyncResult.nodes.length} corosync nodes, local has ${localNodes.length}. Syncing...`);
+        updateCorosyncForMesh(meshConfig.clusterName, corosyncResult.nodes, meshConfig.corosyncPort || 5405);
+      }
+      
+      // Vérifier si Corosync voit moins de membres que la config
+      // Si oui, redémarrer pour appliquer la nodelist complète
+      // Cooldown de 60s pour éviter les boucles de restart (sfha dépend de corosync via systemd)
+      try {
+        // Compter les membres par leur IP (chaque membre a une entrée .ip)
+        const cmapOutput = execSync('corosync-cmapctl | grep "runtime.members" | grep -c "\\.ip"', { encoding: 'utf-8', timeout: 5000 }).trim();
+        const activeMembers = parseInt(cmapOutput, 10) || 1;
+        const configNodes = Math.max(corosyncResult.nodes.length, localNodes.length);
+        
+        if (activeMembers < configNodes) {
+          const now = Date.now();
+          const COOLDOWN_MS = 60000; // 60 secondes entre restarts
+          
+          if (now - lastCorosyncRestart < COOLDOWN_MS) {
+            logger.debug(`P2P: Corosync restart skipped (cooldown ${Math.round((COOLDOWN_MS - (now - lastCorosyncRestart)) / 1000)}s remaining)`);
+          } else {
+            logger.info(`P2P: Corosync sees ${activeMembers} members but config has ${configNodes} nodes. Restarting...`);
+            lastCorosyncRestart = now;
+            execSync('systemctl restart corosync', { stdio: 'pipe', timeout: 10000 });
+            logger.info(`P2P: Corosync restarted`);
+          }
+        }
+      } catch (restartErr: any) {
+        logger.debug(`P2P: Corosync check/restart failed: ${restartErr.message}`);
+      }
+    }
+  } catch (corosyncErr: any) {
+    logger.debug(`P2P: Failed to sync corosync config: ${corosyncErr.message}`);
+  }
+  
   return { success: true, added };
 }
+
+// ============================================
+// Cooldown pour éviter les restarts en boucle
+// ============================================
+
+let lastCorosyncRestart = 0;
 
 // ============================================
 // Singleton

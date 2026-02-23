@@ -418,15 +418,17 @@ export class MeshManager {
     };
 
     // Notifier l'initiateur d'abord
-    const initiatorEndpoint = token.endpoint.split(':')[0];
+    // L'initiateur a une IP publique (endpoint) et une IP mesh
+    const initiatorPublicIp = token.endpoint.split(':')[0];
+    const initiatorMeshIp = token.meshIp;
     let initiatorNotified = false;
     try {
-      // Étape 1: Knock pour ouvrir le port
-      await sendKnock(initiatorEndpoint, token.authkey);
+      // Étape 1: Knock pour ouvrir le port (sur IP publique)
+      await sendKnock(initiatorPublicIp, token.authkey);
       // Attendre un peu que le firewall s'ouvre
       await new Promise(resolve => setTimeout(resolve, 500));
-      // Étape 2: Appeler l'API
-      const initiatorResult = await this.notifyPeerViaApi(initiatorEndpoint, myPeerInfo);
+      // Étape 2: Appeler l'API (hybrid: mesh first, then public fallback)
+      const initiatorResult = await this.notifyPeerViaApi(initiatorMeshIp, initiatorPublicIp, myPeerInfo);
       if (initiatorResult.success) {
         notifyResults.push(`✓ Initiateur notifié`);
         initiatorNotified = true;
@@ -449,7 +451,7 @@ export class MeshManager {
       // Retry jusqu'à 3 fois pour récupérer la config corosync
       for (let retry = 0; retry < 3; retry++) {
         try {
-          const corosyncResult = await fetchCorosyncNodesFromPeer(initiatorEndpoint, token.authkey);
+          const corosyncResult = await fetchCorosyncNodesFromPeer(initiatorPublicIp, token.authkey);
           if (corosyncResult.success && corosyncResult.nodes && corosyncResult.nodes.length > 0) {
             corosyncNodes = corosyncResult.nodes;
             notifyResults.push(`✓ Config Corosync synchronisée (${corosyncNodes.length} nœuds)`);
@@ -518,11 +520,12 @@ export class MeshManager {
     if (token.peers && token.peers.length > 0) {
       for (const p of token.peers) {
         if (p.pubkey !== token.pubkey && p.endpoint) {
-          const peerEndpoint = p.endpoint.split(':')[0];
+          const peerPublicIp = p.endpoint.split(':')[0];
+          const peerMeshIp = p.meshIp;
           try {
-            await sendKnock(peerEndpoint, token.authkey);
+            await sendKnock(peerPublicIp, token.authkey);
             await new Promise(resolve => setTimeout(resolve, 500));
-            const result = await this.notifyPeerViaApi(peerEndpoint, myPeerInfo);
+            const result = await this.notifyPeerViaApi(peerMeshIp, peerPublicIp, myPeerInfo);
             if (result.success) {
               notifyResults.push(`✓ ${p.name} notifié`);
             } else {
@@ -571,30 +574,36 @@ export class MeshManager {
   }
 
   /**
-   * Notifie un peer existant via l'API P2P (port 7777) pour qu'il nous ajoute
+   * Helper HTTP POST avec timeout configurable
    */
-  private notifyPeerViaApi(peerMeshIp: string, myInfo: { name: string; publicKey: string; endpoint: string; meshIp: string }): Promise<{ success: boolean; error?: string }> {
+  private httpPost(
+    host: string,
+    port: number,
+    path: string,
+    data: object,
+    timeoutMs: number
+  ): Promise<{ success: boolean; error?: string; data?: any }> {
     return new Promise((resolve) => {
-      const postData = JSON.stringify(myInfo);
+      const postData = JSON.stringify(data);
       const options = {
-        hostname: peerMeshIp,
-        port: 7777,
-        path: '/add-peer',
+        hostname: host,
+        port,
+        path,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(postData),
         },
-        timeout: 5000,
+        timeout: timeoutMs,
       };
 
       const req = http.request(options, (res) => {
-        let data = '';
-        res.on('data', (chunk) => { data += chunk; });
+        let responseData = '';
+        res.on('data', (chunk) => { responseData += chunk; });
         res.on('end', () => {
           try {
-            const response = JSON.parse(data);
-            resolve({ success: response.success, error: response.error });
+            const response = JSON.parse(responseData);
+            resolve({ success: response.success, error: response.error, data: response });
           } catch {
             resolve({ success: false, error: 'Invalid response' });
           }
@@ -613,6 +622,34 @@ export class MeshManager {
       req.write(postData);
       req.end();
     });
+  }
+
+  /**
+   * Notifie un peer existant via l'API P2P (port 7777) pour qu'il nous ajoute
+   * Hybrid bootstrap: essaie d'abord l'IP mesh (2s), puis fallback sur IP publique (5s)
+   */
+  private async notifyPeerViaApi(
+    meshIp: string,
+    publicIp: string | undefined,
+    myInfo: { name: string; publicKey: string; endpoint: string; meshIp: string; authKey: string }
+  ): Promise<{ success: boolean; error?: string }> {
+    // Étape 1: Essayer via l'IP mesh (timeout court car tunnel peut ne pas être établi)
+    const meshResult = await this.httpPost(meshIp, 7777, '/add-peer', myInfo, 2000);
+    if (meshResult.success) {
+      return { success: true };
+    }
+
+    // Étape 2: Fallback sur IP publique si disponible
+    if (publicIp) {
+      console.log(`[mesh] Fallback to public IP ${publicIp} (mesh ${meshIp} failed: ${meshResult.error})`);
+      const publicResult = await this.httpPost(publicIp, 7777, '/add-peer', myInfo, 5000);
+      if (publicResult.success) {
+        return { success: true };
+      }
+      return { success: false, error: `mesh: ${meshResult.error}, public: ${publicResult.error}` };
+    }
+
+    return { success: false, error: meshResult.error };
   }
 
   /**

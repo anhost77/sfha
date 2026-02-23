@@ -10,12 +10,18 @@
  */
 
 import { createSocket, Socket } from 'dgram';
+import { timingSafeEqual } from 'crypto';
 import { logger } from './utils/logger.js';
 import { getMeshManager } from './mesh/manager.js';
 
 const KNOCK_PREFIX = 'SFHA_KNOCK:';
 const KNOCK_PORT = 51821; // Port différent de WireGuard (51820)
 const KNOCK_TIMEOUT_MS = 30000; // 30 secondes
+
+// Rate limiting: max 10 knocks par minute par IP
+const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute
+const RATE_LIMIT_MAX_KNOCKS = 10;
+const knockRateLimits = new Map<string, { count: number; windowStart: number }>();
 
 let knockServer: Socket | null = null;
 
@@ -145,11 +151,53 @@ export function stopKnockServer(): void {
 }
 
 /**
+ * Vérifie le rate limit pour une IP
+ * @returns true si la requête est autorisée, false si rate limited
+ */
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const limit = knockRateLimits.get(ip);
+  
+  if (!limit || (now - limit.windowStart) > RATE_LIMIT_WINDOW_MS) {
+    // Nouvelle fenêtre ou première requête
+    knockRateLimits.set(ip, { count: 1, windowStart: now });
+    return true;
+  }
+  
+  if (limit.count >= RATE_LIMIT_MAX_KNOCKS) {
+    logger.warn(`🔔 Knock: rate limit exceeded for ${ip} (${limit.count}/${RATE_LIMIT_MAX_KNOCKS} in ${RATE_LIMIT_WINDOW_MS/1000}s)`);
+    return false;
+  }
+  
+  limit.count++;
+  return true;
+}
+
+/**
+ * Comparaison sécurisée de deux strings (timing-safe)
+ */
+function safeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  try {
+    return timingSafeEqual(Buffer.from(a, 'utf-8'), Buffer.from(b, 'utf-8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Traite un paquet knock reçu
  */
 function handleKnockPacket(data: string, sourceIp: string): void {
   if (!data.startsWith(KNOCK_PREFIX)) {
     return; // Pas un paquet knock
+  }
+
+  // Rate limiting
+  if (!checkRateLimit(sourceIp)) {
+    return;
   }
 
   const authKey = data.substring(KNOCK_PREFIX.length).trim();
@@ -162,7 +210,8 @@ function handleKnockPacket(data: string, sourceIp: string): void {
     return;
   }
 
-  if (authKey !== meshConfig.authKey) {
+  // Comparaison timing-safe pour éviter les timing attacks
+  if (!safeCompare(authKey, meshConfig.authKey)) {
     logger.warn(`🔔 Knock: authKey invalide de ${sourceIp}`);
     return;
   }
