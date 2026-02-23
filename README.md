@@ -11,7 +11,7 @@
 # sfha — Haute Disponibilité légère pour Linux
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.69-green.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-1.0.70-green.svg)](package.json)
 [![Debian](https://img.shields.io/badge/Debian-11%2B-red.svg)](https://www.debian.org/)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%2B-orange.svg)](https://ubuntu.com/)
 [![Made in France](https://img.shields.io/badge/Made%20in-France%20🇫🇷-blue.svg)](#)
@@ -42,10 +42,10 @@
 
 ```bash
 # Télécharger le .deb depuis les releases GitHub
-wget https://github.com/anhost77/sfha/releases/latest/download/sfha_1.0.69_amd64.deb
+wget https://github.com/anhost77/sfha/releases/latest/download/sfha_1.0.70_amd64.deb
 
 # Installer (aucune dépendance requise sauf corosync)
-sudo dpkg -i sfha_1.0.69_amd64.deb
+sudo dpkg -i sfha_1.0.70_amd64.deb
 
 # Vérifier l'installation
 sfha --version
