@@ -5,6 +5,102 @@ Toutes les modifications notables de ce projet seront documentées dans ce fichi
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
 et ce projet adhère au [Versionnement Sémantique](https://semver.org/lang/fr/).
 
+## [1.0.69] - 2026-02-24
+
+### Ajouté
+
+- **Propagation automatique au reload** : quand le leader fait `sfha reload`, la config est automatiquement propagée à tous les nœuds
+- **Debug logs dans handleLeaderChange** : meilleur diagnostic de l'activation des ressources
+
+### Corrigé
+
+- **Fix import dynamique yaml** : remplacé `await import('yaml')` par import statique (compatibilité bundling pkg)
+- **Fix systemd restart LXC** : ajout `KillMode=process` et `ExecStop` pour un arrêt propre dans les containers
+- **Timeout propagation** : augmenté de 5s à 30s pour éviter les échecs sur nœuds occupés
+
+---
+
+## [1.0.67] - 2026-02-24
+
+### Corrigé
+
+- **Fix "A dynamic import callback was not specified"** : erreur fatale lors de la propagation causée par `import('yaml')` dynamique incompatible avec pkg
+
+---
+
+## [1.0.66] - 2026-02-24
+
+### Corrigé
+
+- **Fix activation VIP au démarrage** : les ressources s'activent maintenant correctement quand le daemon devient leader
+- **Ajout appel explicite à handleLeaderChange** dans checkElection() pour garantir l'activation
+
+---
+
+## [1.0.65] - 2026-02-24
+
+### Modifié
+
+- **Timeout propagation** : 5s → 30s pour éviter les échecs sur nœuds occupés à activer leurs VIPs
+
+---
+
+## [1.0.64] - 2026-02-24
+
+### Ajouté
+
+- **Propagation automatique** : `reload()` sur le leader déclenche automatiquement la propagation aux autres nœuds
+
+---
+
+## [1.0.63] - 2026-02-24
+
+### Ajouté
+
+- **Propagation des VIPs** : la commande `propagate` inclut maintenant les VIPs, services et constraints du leader
+
+### Corrigé
+
+- **Config YAML complète** : le handler `/full-config` génère maintenant un YAML complet avec toutes les VIPs
+
+---
+
+## [1.0.62] - 2026-02-23
+
+### Corrigé
+
+- **Activation VIP après reload** : nouvelles VIPs activées automatiquement sur le leader lors d'un `sfha reload`
+
+---
+
+## [1.0.61] - 2026-02-23
+
+### Corrigé
+
+- **Null checks arrays** : protection contre les crashes quand vips/services/constraints sont undefined
+- **Propagation ordre** : Corosync config créée AVANT l'ajout des peers WireGuard
+- **addPeerWgOnly()** : nouvelle fonction pour ajouter un peer WG sans toucher à Corosync
+
+---
+
+## [1.0.60] - 2026-02-23
+
+### Corrigé
+
+- **Fix ESM imports** : `require('os')` remplacé par `import os`
+- **Service systemd** : utilise `/bin/sfha run` au lieu du chemin node interne
+- **VERSION hardcodée** : synchronisation cli.ts et daemon.ts
+
+---
+
+## [1.0.59] - 2026-02-23
+
+### Corrigé
+
+- **Destroy cluster** : suppression correcte de cluster-state.json, interface wg-sfha et wg-sfha.conf
+
+---
+
 ## [1.0.58] - 2026-02-23
 
 ### Changements majeurs
