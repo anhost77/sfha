@@ -16,7 +16,7 @@ import { t, initI18n } from './i18n.js';
 import { logger, setLogLevel, createSimpleLogger } from './utils/logger.js';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { getMeshManager } from './mesh/index.js';
-import { P2PStateManager, initP2PStateManager } from './p2p-state.js';
+import { P2PStateManager, initP2PStateManager, syncMeshPeersFromInitiator } from './p2p-state.js';
 import { startKnockServer, stopKnockServer, authorizePermanently } from './knock.js';
 
 // ============================================
@@ -73,7 +73,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.7';
+const VERSION = '1.0.42';
 
 // ============================================
 // Daemon
@@ -236,6 +236,13 @@ export class SfhaDaemon extends EventEmitter {
       logger.debug('P2P: État distant changé, re-élection...');
       this.checkElection();
     });
+    
+    // Synchroniser les peers manquants depuis l'initiateur
+    // Cela garantit que tous les nodes ont la liste complète des peers
+    // Attendre 3 secondes que le mesh WireGuard soit stable
+    setTimeout(() => {
+      this.syncPeersFromInitiator();
+    }, 3000);
     
     // Attendre le quorum si requis
     if (this.config!.cluster.quorumRequired) {
@@ -1323,7 +1330,20 @@ export class SfhaDaemon extends EventEmitter {
     // Pour une sécurité renforcée, configurer un firewall sur le port 7777
     logger.info(`P2P: écoute sur 0.0.0.0:7777 (protégé par authKey)`);
     return '0.0.0.0';
-    return '127.0.0.1';
+  }
+
+  /**
+   * Synchronise les peers manquants depuis l'initiateur
+   */
+  private async syncPeersFromInitiator(): Promise<void> {
+    try {
+      const result = await syncMeshPeersFromInitiator();
+      if (result.added > 0) {
+        logger.info(`P2P: Synced ${result.added} peer(s) from initiator`);
+      }
+    } catch (err: any) {
+      logger.info(`P2P: Sync from initiator failed: ${err.message}`);
+    }
   }
 
   /**

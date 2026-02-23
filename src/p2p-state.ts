@@ -251,15 +251,19 @@ export class P2PStateManager {
                   // Ne pas propager au peer qu'on vient d'ajouter
                   if (existingPeer.publicKey === peerData.publicKey) continue;
                   
+                  // Utiliser l'IP mesh du peer (le serveur P2P écoute sur l'IP mesh, pas l'IP publique)
+                  const existingPeerMeshIp = existingPeer.allowedIps?.split('/')[0];
                   const existingPeerEndpoint = existingPeer.endpoint?.split(':')[0];
-                  if (!existingPeerEndpoint) continue;
+                  if (!existingPeerMeshIp) continue;
                   
                   try {
-                    // Knock pour ouvrir le port
-                    await sendKnock(existingPeerEndpoint, meshConfig.authKey);
-                    await new Promise(resolve => setTimeout(resolve, 300));
+                    // Knock pour ouvrir le port (sur l'IP publique)
+                    if (existingPeerEndpoint) {
+                      await sendKnock(existingPeerEndpoint, meshConfig.authKey);
+                      await new Promise(resolve => setTimeout(resolve, 300));
+                    }
                     
-                    // Propager le nouveau peer via POST /add-peer
+                    // Propager le nouveau peer via POST /add-peer (sur l'IP mesh via WireGuard)
                     const propagationData = {
                       name: peerData.name,
                       publicKey: peerData.publicKey,
@@ -269,10 +273,52 @@ export class P2PStateManager {
                       propagated: true, // Marquer comme propagation pour éviter les boucles
                     };
                     
-                    await propagatePeerToNode(existingPeerEndpoint, propagationData);
+                    await propagatePeerToNode(existingPeerMeshIp, propagationData);
                     logger.info(`P2P: Propagated ${peerData.name} to ${existingPeer.name}`);
                   } catch (err: any) {
                     logger.warn(`P2P: Failed to propagate ${peerData.name} to ${existingPeer.name}: ${err.message}`);
+                  }
+                }
+              }
+              
+              // ===== Propager les peers EXISTANTS vers le NOUVEAU node =====
+              // Cela permet à node3 de connaître node2 quand node3 rejoint via node1
+              if (!peerData.propagated && meshConfig.peers.length > 1) {
+                const newNodeMeshIp = cleanMeshIp;
+                const newNodeEndpoint = peerData.endpoint?.split(':')[0];
+                
+                // Attendre que le daemon du nouveau node soit démarré (5 secondes)
+                // Le daemon met ~3-4 secondes à démarrer complètement
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                
+                logger.info(`P2P: Sending ${meshConfig.peers.length - 1} existing peers to new node ${peerData.name}`);
+                
+                for (const existingPeer of meshConfig.peers) {
+                  // Ne pas envoyer le nouveau peer à lui-même
+                  if (existingPeer.publicKey === peerData.publicKey) continue;
+                  
+                  try {
+                    // Knock le nouveau node pour ouvrir son port
+                    if (newNodeEndpoint) {
+                      await sendKnock(newNodeEndpoint, meshConfig.authKey);
+                      await new Promise(resolve => setTimeout(resolve, 300));
+                    }
+                    
+                    // Envoyer le peer existant au nouveau node
+                    const existingPeerMeshIp = existingPeer.allowedIps?.split('/')[0] || '';
+                    const reverseData = {
+                      name: existingPeer.name,
+                      publicKey: existingPeer.publicKey,
+                      endpoint: existingPeer.endpoint || '',
+                      meshIp: existingPeerMeshIp,
+                      authKey: meshConfig.authKey,
+                      propagated: true,
+                    };
+                    
+                    await propagatePeerToNode(newNodeMeshIp, reverseData);
+                    logger.info(`P2P: Sent existing peer ${existingPeer.name} to new node ${peerData.name}`);
+                  } catch (err: any) {
+                    logger.warn(`P2P: Failed to send ${existingPeer.name} to ${peerData.name}: ${err.message}`);
                   }
                 }
               }
@@ -364,6 +410,45 @@ export class P2PStateManager {
         return;
       }
       
+      // ===== GET /mesh-peers =====
+      // Retourne la liste complète des peers WireGuard
+      // SECURITY: Requires valid authKey in query or header
+      if (req.method === 'GET' && req.url?.startsWith('/mesh-peers')) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const authKey = url.searchParams.get('authKey') || req.headers['x-auth-key'] as string;
+        
+        const mesh = getMeshManager();
+        const meshConfig = mesh.getConfig();
+        
+        if (!meshConfig) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+          return;
+        }
+        
+        if (!authKey || authKey !== meshConfig.authKey) {
+          logger.debug(`P2P: Rejected mesh-peers request - invalid authKey`);
+          res.writeHead(404);
+          res.end('Not Found');
+          return;
+        }
+        
+        // Retourner tous les peers avec leurs infos complètes
+        const peers = meshConfig.peers.map(p => ({
+          name: p.name,
+          publicKey: p.publicKey,
+          endpoint: p.endpoint,
+          meshIp: p.allowedIps?.split('/')[0] || '',
+        }));
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          success: true, 
+          peers,
+        }));
+        return;
+      }
+      
       // ===== POST /sync-corosync =====
       // Reçoit une nodelist complète et réécrit le corosync.conf local
       // SECURITY: Requires valid authKey in request body
@@ -400,6 +485,15 @@ export class P2PStateManager {
             if (!data.nodes || !Array.isArray(data.nodes) || data.nodes.length === 0) {
               res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: false, error: 'Missing or empty nodes array' }));
+              return;
+            }
+            
+            // Vérifier si la config locale a plus de nodes - ne pas écraser une config plus complète
+            const localNodes = getCorosyncNodes();
+            if (localNodes.length > data.nodes.length) {
+              logger.info(`P2P: Ignoring sync-corosync with ${data.nodes.length} nodes (local has ${localNodes.length})`);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, message: 'Local config is more complete, keeping it' }));
               return;
             }
             
@@ -709,6 +803,130 @@ export function fetchCorosyncNodesFromPeer(
       resolve({ success: false, error: 'Timeout' });
     });
   });
+}
+
+// ============================================
+// Mesh Peers Sync
+// ============================================
+
+export interface MeshPeerInfo {
+  name: string;
+  publicKey: string;
+  endpoint: string;
+  meshIp: string;
+}
+
+/**
+ * Récupère la liste des peers WireGuard depuis un peer distant
+ */
+export function fetchMeshPeersFromPeer(
+  peerIp: string, 
+  authKey: string
+): Promise<{ success: boolean; peers?: MeshPeerInfo[]; error?: string }> {
+  return new Promise((resolve) => {
+    const url = `http://${peerIp}:7777/mesh-peers?authKey=${encodeURIComponent(authKey)}`;
+    
+    const timeout = setTimeout(() => {
+      resolve({ success: false, error: 'Timeout' });
+    }, 5000);
+    
+    const req = http.get(url, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        clearTimeout(timeout);
+        try {
+          const response = JSON.parse(data);
+          if (response.success) {
+            resolve({ success: true, peers: response.peers });
+          } else {
+            resolve({ success: false, error: response.error || 'Unknown error' });
+          }
+        } catch {
+          resolve({ success: false, error: 'Invalid response' });
+        }
+      });
+    });
+    
+    req.on('error', (err) => {
+      clearTimeout(timeout);
+      resolve({ success: false, error: err.message });
+    });
+    
+    req.on('timeout', () => {
+      req.destroy();
+      clearTimeout(timeout);
+      resolve({ success: false, error: 'Timeout' });
+    });
+  });
+}
+
+/**
+ * Synchronise les peers WireGuard manquants depuis l'initiateur
+ * Appelé au démarrage du daemon pour s'assurer d'avoir tous les peers
+ */
+export async function syncMeshPeersFromInitiator(): Promise<{ success: boolean; added: number; error?: string }> {
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  
+  if (!meshConfig) {
+    return { success: false, added: 0, error: 'No mesh configured' };
+  }
+  
+  // Trouver l'initiateur (premier peer, généralement nommé "initiator" ou le premier dans la liste)
+  const initiatorPeer = meshConfig.peers.find(p => p.name === 'initiator') || meshConfig.peers[0];
+  if (!initiatorPeer) {
+    return { success: false, added: 0, error: 'No initiator peer found' };
+  }
+  
+  const initiatorMeshIp = initiatorPeer.allowedIps?.split('/')[0];
+  if (!initiatorMeshIp) {
+    return { success: false, added: 0, error: 'No initiator mesh IP' };
+  }
+  
+  logger.info(`P2P: Syncing mesh peers from initiator ${initiatorMeshIp}...`);
+  
+  // Récupérer les peers depuis l'initiateur
+  const result = await fetchMeshPeersFromPeer(initiatorMeshIp, meshConfig.authKey);
+  if (!result.success || !result.peers) {
+    return { success: false, added: 0, error: result.error || 'Failed to fetch peers' };
+  }
+  
+  // Ajouter les peers manquants
+  let added = 0;
+  for (const remotePeer of result.peers) {
+    // Vérifier si on a déjà ce peer
+    const exists = meshConfig.peers.some(p => p.publicKey === remotePeer.publicKey);
+    if (exists) continue;
+    
+    // Vérifier que ce n'est pas nous-même
+    if (remotePeer.publicKey === meshConfig.publicKey) continue;
+    
+    // Ajouter le peer
+    const addResult = mesh.addPeer({
+      name: remotePeer.name,
+      publicKey: remotePeer.publicKey,
+      endpoint: remotePeer.endpoint,
+      allowedIps: `${remotePeer.meshIp}/32`,
+    });
+    
+    if (addResult.success) {
+      logger.info(`P2P: Added missing peer ${remotePeer.name} from initiator`);
+      added++;
+    } else {
+      logger.warn(`P2P: Failed to add peer ${remotePeer.name}: ${addResult.error}`);
+    }
+  }
+  
+  if (added > 0) {
+    logger.info(`P2P: Synced ${added} missing peer(s) from initiator`);
+  }
+  
+  return { success: true, added };
 }
 
 // ============================================

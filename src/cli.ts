@@ -27,7 +27,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.29';
+const VERSION = '1.0.42';
 
 function getVersion(): string {
   return VERSION;
@@ -1528,6 +1528,8 @@ async function initCommand(options: {
     // Créer automatiquement le config.yml
     const configPath = '/etc/sfha/config.yml';
     if (!existsSync(configPath)) {
+      // Utiliser le hostname de la machine comme nom de nœud
+      const nodeName = hostname();
       let configContent = `# Configuration sfha - générée par sfha init
 cluster:
   name: ${options.name}
@@ -1536,7 +1538,7 @@ cluster:
   poll_interval_ms: 2000
 
 node:
-  name: node1
+  name: ${nodeName}
   priority: 100
 
 vips: []

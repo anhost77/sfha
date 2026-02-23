@@ -28,7 +28,19 @@ export function updateCorosyncForMesh(
     copyFileSync(COROSYNC_CONF_PATH, backupPath);
   }
 
-  const config = generateCorosyncConfig(clusterName, nodes, corosyncPort);
+  // Dédupliquer les nœuds (par nom et par IP)
+  const seenNames = new Set<string>();
+  const seenIps = new Set<string>();
+  const uniqueNodes = nodes.filter(node => {
+    if (seenNames.has(node.name) || seenIps.has(node.ip)) {
+      return false;
+    }
+    seenNames.add(node.name);
+    seenIps.add(node.ip);
+    return true;
+  });
+
+  const config = generateCorosyncConfig(clusterName, uniqueNodes, corosyncPort);
   writeFileSync(COROSYNC_CONF_PATH, config, { mode: 0o644 });
 }
 
@@ -111,11 +123,27 @@ function calculateBindnetaddr(ip: string): string {
 
 /**
  * Ajoute un nœud à la configuration Corosync
+ * Ne fait rien si le nœud existe déjà (évite les doublons)
  */
 export function addNodeToCorosync(node: MeshNode): void {
   if (!existsSync(COROSYNC_CONF_PATH)) {
     throw new Error('Configuration Corosync introuvable');
   }
+
+  // Vérifier si le nœud existe déjà (par nom ou par IP)
+  const currentNodes = getCorosyncNodes();
+  const alreadyExists = currentNodes.some(
+    n => n.name === node.name || n.ip === node.ip
+  );
+  
+  if (alreadyExists) {
+    // Node déjà présent, ne pas ajouter de doublon
+    // Log pour debug
+    console.log(`[corosync-mesh] Node ${node.name} (${node.ip}) already exists, skipping`);
+    return;
+  }
+  
+  console.log(`[corosync-mesh] Adding node ${node.name} (${node.ip}) with nodeId ${node.nodeId}`);
 
   let content = readFileSync(COROSYNC_CONF_PATH, 'utf-8');
   

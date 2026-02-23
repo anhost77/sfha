@@ -340,8 +340,9 @@ export class MeshManager {
     }
 
     // Créer le peer initial (le nœud qui a généré le token)
+    // initiatorName devrait toujours être présent dans les tokens v3+
     const initiatorPeer: MeshPeer = {
-      name: token.initiatorName || 'initiator',
+      name: token.initiatorName || `node-${token.meshIp.replace(/\./g, '-')}`,
       publicKey: token.pubkey,
       endpoint: token.endpoint,
       allowedIps: `${token.meshIp}/32`,
@@ -442,50 +443,64 @@ export class MeshManager {
     let corosyncNodes: { name: string; ip: string; nodeId: number }[] = [];
     
     if (initiatorNotified) {
-      // Attendre que l'initiateur ait synchronisé les autres nœuds
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Attendre que l'initiateur ait synchronisé (2 secondes)
+      await new Promise(resolve => setTimeout(resolve, 2000));
       
-      try {
-        const corosyncResult = await fetchCorosyncNodesFromPeer(initiatorEndpoint, token.authkey);
-        if (corosyncResult.success && corosyncResult.nodes && corosyncResult.nodes.length > 0) {
-          corosyncNodes = corosyncResult.nodes;
-          notifyResults.push(`✓ Config Corosync synchronisée (${corosyncNodes.length} nœuds)`);
+      // Retry jusqu'à 3 fois pour récupérer la config corosync
+      for (let retry = 0; retry < 3; retry++) {
+        try {
+          const corosyncResult = await fetchCorosyncNodesFromPeer(initiatorEndpoint, token.authkey);
+          if (corosyncResult.success && corosyncResult.nodes && corosyncResult.nodes.length > 0) {
+            corosyncNodes = corosyncResult.nodes;
+            notifyResults.push(`✓ Config Corosync synchronisée (${corosyncNodes.length} nœuds)`);
+            break;
+          }
+        } catch (err: any) {
+          // Retry après 1 seconde
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-      } catch (err: any) {
-        // On ne fait rien, on va générer une config partielle
       }
     }
     
     // Si on n'a pas pu récupérer la config depuis l'initiateur, générer une config partielle
+    // en utilisant les nodeIds du token (qui viennent de la config corosync de l'initiateur)
     if (corosyncNodes.length === 0) {
-      let nodeId = 1;
-
-      // Ajouter l'initiateur comme premier nœud
+      // L'initiateur a toujours nodeId=1
       corosyncNodes.push({
-        name: token.initiatorName || 'node1',
+        name: token.initiatorName || getHostname(),
         ip: token.meshIp,
-        nodeId: nodeId++,
+        nodeId: 1,
       });
 
-      // Ajouter tous les autres peers existants
+      // Track le max nodeId pour calculer celui du nouveau nœud
+      let maxNodeId = 1;
+
+      // Ajouter tous les autres peers existants avec leurs nodeIds du token
       if (token.peers && token.peers.length > 0) {
         for (const p of token.peers) {
           if (p.pubkey !== token.pubkey) {
+            // Utiliser le nodeId du token, ou calculer le prochain si absent
+            const nodeId = p.nodeId || (maxNodeId + 1);
+            if (nodeId > maxNodeId) maxNodeId = nodeId;
+            
             corosyncNodes.push({
               name: p.name,
               ip: p.meshIp,
-              nodeId: nodeId++,
+              nodeId: nodeId,
             });
           }
         }
       }
 
-      // Ajouter ce nœud (le nouveau joiner)
+      // Ajouter ce nœud (le nouveau joiner) avec le prochain nodeId disponible
       corosyncNodes.push({
         name: localNodeName,
         ip: extractMeshIp(meshIp),
-        nodeId: nodeId,
+        nodeId: maxNodeId + 1,
       });
+      
+      // Trier par nodeId pour cohérence
+      corosyncNodes.sort((a, b) => a.nodeId - b.nodeId);
     }
 
     // Écrire la config Corosync
@@ -522,9 +537,36 @@ export class MeshManager {
 
     const notifyLog = notifyResults.length > 0 ? `\nNotifications: ${notifyResults.join(', ')}` : '';
 
+    // ===== Attendre la propagation complète des peers =====
+    // Les autres nœuds doivent nous ajouter et nous envoyer leurs peers
+    const expectedPeerCount = (token.peers?.length || 0) + 1; // +1 pour l'initiateur
+    let propagationComplete = false;
+    const maxWaitMs = 20000; // 20 secondes max
+    const pollIntervalMs = 2000;
+    let waited = 0;
+    
+    while (waited < maxWaitMs && !propagationComplete) {
+      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+      waited += pollIntervalMs;
+      
+      // Recharger la config pour voir les nouveaux peers
+      this.loadConfig();
+      const currentPeerCount = this.config?.peers.length || 0;
+      
+      if (currentPeerCount >= expectedPeerCount) {
+        propagationComplete = true;
+        notifyResults.push(`✓ Propagation complète (${currentPeerCount} peers)`);
+      }
+    }
+    
+    if (!propagationComplete) {
+      const currentPeerCount = this.config?.peers.length || 0;
+      notifyResults.push(`⚠ Propagation partielle (${currentPeerCount}/${expectedPeerCount} peers après ${waited/1000}s)`);
+    }
+
     return {
       success: true,
-      message: `Rejoint le cluster "${token.cluster}" avec l'IP mesh ${meshIp}. ${allPeers.length} peer(s) configuré(s).${notifyLog}`,
+      message: `Rejoint le cluster "${token.cluster}" avec l'IP mesh ${meshIp}. ${allPeers.length} peer(s) initial(s).${notifyLog ? '\n' + notifyResults.join(', ') : ''}`,
     };
   }
 
@@ -601,13 +643,20 @@ export class MeshManager {
       detectPublicEndpoint(this.config.listenPort) ||
       `0.0.0.0:${this.config.listenPort}`;
 
-    // Collecter tous les peers existants pour le nouveau nœud
-    const peers = this.config.peers.map((p) => ({
-      name: p.name,
-      pubkey: p.publicKey,
-      endpoint: p.endpoint || '',
-      meshIp: p.allowedIps.split('/')[0],
-    }));
+    // Collecter tous les peers existants pour le nouveau nœud, avec leurs nodeIds
+    const corosyncNodes = getCorosyncNodes();
+    const peers = this.config.peers.map((p) => {
+      const peerMeshIp = p.allowedIps.split('/')[0];
+      // Trouver le nodeId correspondant dans la config corosync
+      const corosyncNode = corosyncNodes.find(n => n.ip === peerMeshIp || n.name === p.name);
+      return {
+        name: p.name,
+        pubkey: p.publicKey,
+        endpoint: p.endpoint || '',
+        meshIp: peerMeshIp,
+        nodeId: corosyncNode?.nodeId,
+      };
+    });
 
     const token = createJoinToken({
       cluster: this.config.clusterName,

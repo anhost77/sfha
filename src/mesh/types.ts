@@ -38,6 +38,7 @@ export interface TokenPeer {
   pubkey: string;
   endpoint: string;
   meshIp: string;
+  nodeId?: number;  // NodeId corosync pour synchronisation correcte
 }
 
 /**
