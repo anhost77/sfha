@@ -29,7 +29,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.69';
+const VERSION = '1.0.70';
 
 function getVersion(): string {
   return VERSION;
@@ -1375,6 +1375,202 @@ program
   .command('reload')
   .description('Recharger la configuration')
   .action(reloadCommand);
+
+// ============================================
+// VIP Subcommands
+// ============================================
+
+const vip = program
+  .command('vip')
+  .description('Gestion des VIPs (adresses IP virtuelles)');
+
+vip
+  .command('list')
+  .description('Lister les VIPs configurées')
+  .option('-j, --json', 'Sortie JSON')
+  .action(vipListCommand);
+
+vip
+  .command('add <name> <ip> [interface]')
+  .description('Ajouter une VIP (ex: sfha vip add web 192.168.1.200/24 eth0)')
+  .option('--no-reload', 'Ne pas recharger la config après ajout')
+  .option('--no-propagate', 'Ne pas propager aux autres nœuds')
+  .action(vipAddCommand);
+
+vip
+  .command('remove <name>')
+  .description('Supprimer une VIP')
+  .option('--no-reload', 'Ne pas recharger la config après suppression')
+  .option('--no-propagate', 'Ne pas propager aux autres nœuds')
+  .action(vipRemoveCommand);
+
+async function vipListCommand(options: { json?: boolean }): Promise<void> {
+  const configPath = '/etc/sfha/config.yml';
+  
+  if (!existsSync(configPath)) {
+    if (options.json) {
+      console.log(JSON.stringify({ success: false, error: 'Config file not found' }));
+    } else {
+      console.error(colorize('✗', 'red'), 'Fichier de configuration non trouvé:', configPath);
+    }
+    process.exit(1);
+  }
+  
+  try {
+    const content = readFileSync(configPath, 'utf-8');
+    const config = parseYaml(content);
+    const vips = config.vips || [];
+    
+    if (options.json) {
+      console.log(JSON.stringify({ success: true, vips }));
+    } else {
+      if (vips.length === 0) {
+        console.log(colorize('Aucune VIP configurée', 'gray'));
+      } else {
+        console.log(colorize('VIPs configurées:', 'blue'));
+        for (const v of vips) {
+          console.log(`  • ${v.name}: ${v.ip}/${v.cidr} sur ${v.interface}`);
+        }
+      }
+    }
+  } catch (err: any) {
+    if (options.json) {
+      console.log(JSON.stringify({ success: false, error: err.message }));
+    } else {
+      console.error(colorize('✗', 'red'), 'Erreur:', err.message);
+    }
+    process.exit(1);
+  }
+}
+
+async function vipAddCommand(
+  name: string,
+  ipWithCidr: string,
+  iface: string = 'eth0',
+  options: { reload?: boolean; propagate?: boolean }
+): Promise<void> {
+  const configPath = '/etc/sfha/config.yml';
+  
+  // Parse IP and CIDR
+  const match = ipWithCidr.match(/^(\d+\.\d+\.\d+\.\d+)(?:\/(\d+))?$/);
+  if (!match) {
+    console.error(colorize('✗', 'red'), 'Format IP invalide. Utilisez: 192.168.1.200/24 ou 192.168.1.200');
+    process.exit(1);
+  }
+  
+  const ip = match[1];
+  const cidr = match[2] ? parseInt(match[2]) : 24;
+  
+  if (!existsSync(configPath)) {
+    console.error(colorize('✗', 'red'), 'Fichier de configuration non trouvé:', configPath);
+    process.exit(1);
+  }
+  
+  try {
+    const content = readFileSync(configPath, 'utf-8');
+    const config = parseYaml(content);
+    
+    if (!config.vips) {
+      config.vips = [];
+    }
+    
+    // Check if VIP already exists
+    const existing = config.vips.find((v: any) => v.name === name);
+    if (existing) {
+      console.error(colorize('✗', 'red'), `VIP "${name}" existe déjà (${existing.ip})`);
+      process.exit(1);
+    }
+    
+    // Add VIP
+    config.vips.push({
+      name,
+      ip,
+      cidr,
+      interface: iface,
+    });
+    
+    // Write config
+    writeFileSync(configPath, stringifyYaml(config, { indent: 2 }));
+    console.log(colorize('✓', 'green'), `VIP "${name}" ajoutée: ${ip}/${cidr} sur ${iface}`);
+    
+    // Reload if requested
+    if (options.reload !== false) {
+      console.log(colorize('⟳', 'blue'), 'Rechargement de la configuration...');
+      try {
+        const response = await sendCommand({ action: 'reload' });
+        if (response.success) {
+          console.log(colorize('✓', 'green'), 'Configuration rechargée');
+        } else {
+          console.warn(colorize('⚠', 'yellow'), 'Reload échoué:', response.message || response.error);
+        }
+      } catch {
+        // Daemon might not be running, that's OK
+        console.log(colorize('ℹ', 'gray'), 'Daemon non actif, reload ignoré');
+      }
+    }
+    
+  } catch (err: any) {
+    console.error(colorize('✗', 'red'), 'Erreur:', err.message);
+    process.exit(1);
+  }
+}
+
+async function vipRemoveCommand(
+  name: string,
+  options: { reload?: boolean; propagate?: boolean }
+): Promise<void> {
+  const configPath = '/etc/sfha/config.yml';
+  
+  if (!existsSync(configPath)) {
+    console.error(colorize('✗', 'red'), 'Fichier de configuration non trouvé:', configPath);
+    process.exit(1);
+  }
+  
+  try {
+    const content = readFileSync(configPath, 'utf-8');
+    const config = parseYaml(content);
+    
+    if (!config.vips || config.vips.length === 0) {
+      console.error(colorize('✗', 'red'), 'Aucune VIP configurée');
+      process.exit(1);
+    }
+    
+    const index = config.vips.findIndex((v: any) => v.name === name);
+    if (index === -1) {
+      console.error(colorize('✗', 'red'), `VIP "${name}" non trouvée`);
+      process.exit(1);
+    }
+    
+    const removed = config.vips.splice(index, 1)[0];
+    
+    // Write config
+    writeFileSync(configPath, stringifyYaml(config, { indent: 2 }));
+    console.log(colorize('✓', 'green'), `VIP "${name}" supprimée (${removed.ip}/${removed.cidr})`);
+    
+    // Reload if requested
+    if (options.reload !== false) {
+      console.log(colorize('⟳', 'blue'), 'Rechargement de la configuration...');
+      try {
+        const response = await sendCommand({ action: 'reload' });
+        if (response.success) {
+          console.log(colorize('✓', 'green'), 'Configuration rechargée');
+        } else {
+          console.warn(colorize('⚠', 'yellow'), 'Reload échoué:', response.message || response.error);
+        }
+      } catch {
+        console.log(colorize('ℹ', 'gray'), 'Daemon non actif, reload ignoré');
+      }
+    }
+    
+  } catch (err: any) {
+    console.error(colorize('✗', 'red'), 'Erreur:', err.message);
+    process.exit(1);
+  }
+}
+
+// ============================================
+// Token Command
+// ============================================
 
 program
   .command('token')
