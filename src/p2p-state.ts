@@ -14,10 +14,13 @@
  */
 
 import http, { createServer, IncomingMessage, ServerResponse, Server } from 'http';
+import os from 'os';
+import { existsSync, writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { getClusterNodes } from './corosync.js';
 import { logger } from './utils/logger.js';
 import { getMeshManager } from './mesh/manager.js';
+import { addPeerToState } from './cluster-state.js';
 import { isIpAuthorized, authorizePermanently, sendKnock } from './knock.js';
 import { getCorosyncNodes, updateCorosyncForMesh, reloadCorosync, MeshNode } from './mesh/corosync-mesh.js';
 
@@ -254,6 +257,10 @@ export class P2PStateManager {
               
               if (!peerData.propagated) {
                 logger.info(`P2P: Peer ${peerData.name} enregistré. Exécutez 'sfha propagate' pour synchroniser tous les nœuds.`);
+                
+                // Mettre à jour l'état du cluster (phase: collecting)
+                const peerPublicIp = peerData.endpoint?.split(':')[0];
+                addPeerToState(peerData.name, cleanMeshIp, peerPublicIp);
               }
               
               res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -450,11 +457,16 @@ export class P2PStateManager {
             
             logger.info(`P2P: Receiving full config (${data.wgPeers.length} WG peers, ${data.corosyncNodes.length} Corosync nodes)`);
             
-            // 1. Ajouter les peers WireGuard manquants
+            // 1. D'ABORD créer corosync.conf (avant d'ajouter les peers qui appellent addNodeToCorosync)
+            const corosyncPort = data.corosyncPort || meshConfig.corosyncPort || 5405;
+            updateCorosyncForMesh(data.clusterName, data.corosyncNodes, corosyncPort);
+            logger.info(`P2P: Created corosync.conf with ${data.corosyncNodes.length} nodes`);
+            
+            // 2. ENSUITE ajouter les peers WireGuard (skipCorosync=true car déjà configuré)
             for (const peer of data.wgPeers) {
               const exists = meshConfig.peers.some(p => p.publicKey === peer.publicKey);
               if (!exists) {
-                mesh.addPeer({
+                mesh.addPeerWgOnly({
                   name: peer.name,
                   publicKey: peer.publicKey,
                   endpoint: peer.endpoint,
@@ -464,14 +476,10 @@ export class P2PStateManager {
               }
             }
             
-            // 2. Appliquer la config Corosync
-            const corosyncPort = data.corosyncPort || meshConfig.corosyncPort || 5405;
-            updateCorosyncForMesh(data.clusterName, data.corosyncNodes, corosyncPort);
-            
             // 3. Créer le fichier config.yml si absent
             const configPath = '/etc/sfha/config.yml';
-            const hostname = require('os').hostname();
-            if (!require('fs').existsSync(configPath)) {
+            const hostname = os.hostname();
+            if (!existsSync(configPath)) {
               const configContent = `# Configuration sfha - générée par sfha propagate
 cluster:
   name: ${data.clusterName}
@@ -486,7 +494,7 @@ node:
 vips: []
 services: []
 `;
-              require('fs').writeFileSync(configPath, configContent);
+              writeFileSync(configPath, configContent);
               logger.info(`P2P: Created config.yml for ${hostname}`);
             }
             
@@ -1168,7 +1176,7 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Prom
   
   // 2. Construire la liste complète des nœuds (moi + peers découverts)
   const myMeshIp = meshConfig.meshIp.split('/')[0];
-  const myHostname = require('os').hostname();
+  const myHostname = os.hostname();
   
   interface NodeInfo {
     name: string;

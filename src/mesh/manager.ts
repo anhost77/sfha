@@ -513,16 +513,12 @@ export class MeshManager {
       corosyncNodes.sort((a, b) => a.nodeId - b.nodeId);
     }
 
-    // Écrire la config Corosync
+    // Écrire la config Corosync (mais NE PAS démarrer - attendre sfha propagate)
     updateCorosyncForMesh(token.cluster, corosyncNodes, token.corosyncPort);
 
-    // Démarrer Corosync automatiquement
-    try {
-      execSync('systemctl enable corosync', { stdio: 'pipe' });
-      execSync('systemctl start corosync', { stdio: 'pipe' });
-    } catch {
-      // Corosync sera démarré manuellement
-    }
+    // NOTE: On ne démarre PAS Corosync ici !
+    // Le workflow est: init -> join (collecting) -> propagate (start corosync)
+    // Corosync sera démarré par sfha propagate une fois tous les nœuds prêts
 
     // Notifier les autres peers existants
     if (token.peers && token.peers.length > 0) {
@@ -724,15 +720,17 @@ export class MeshManager {
     saveWgQuickConfig(WG_INTERFACE, wgConfig);
     enableWgQuickService(WG_INTERFACE);
 
-    // Créer une config Corosync minimale (juste initiateur + ce nœud)
-    // Sera mise à jour par propagate avec tous les nœuds
+    // NE PAS configurer Corosync pendant le join
+    // La config Corosync sera créée par propagate avec TOUS les nœuds corrects
+    // Cela évite les configs incohérentes avec des noms de nœuds incorrects
     const localNodeName = getHostname();
     const localMeshIp = extractMeshIp(meshIp);
-    const corosyncNodes = [
-      { name: token.initiatorName || 'initiator', ip: token.meshIp, nodeId: 1 },
-      { name: localNodeName, ip: localMeshIp, nodeId: 2 },
-    ];
-    updateCorosyncForMesh(token.cluster, corosyncNodes, token.corosyncPort);
+    
+    // Juste sauvegarder le nom de l'initiateur pour référence (sera utilisé par propagate)
+    const initiatorName = token.initiatorName || `node-${token.meshIp.replace(/\./g, '-')}`;
+    console.log(`[mesh] Join: initiator=${initiatorName}, local=${localNodeName}`);
+    
+    // Ne pas appeler updateCorosyncForMesh ici - attendre propagate
 
     // Créer le fichier config.yml
     const configPath = '/etc/sfha/config.yml';
@@ -755,10 +753,9 @@ services: []
       writeFileSync(configPath, configContent);
     }
 
-    // Démarrer Corosync et sfha
+    // Démarrer SEULEMENT sfha (pas Corosync - attendre propagate)
+    // Le workflow est: init -> join (collecting) -> propagate (start corosync)
     try {
-      execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
-      execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
       execSync('systemctl enable sfha 2>/dev/null || true', { stdio: 'pipe' });
       execSync('systemctl start sfha 2>/dev/null || true', { stdio: 'pipe' });
     } catch {
@@ -996,6 +993,42 @@ services: []
       success: true,
       message: `Peer ${peer.name} ajouté avec succès (nodeId: ${nextNodeId}).`,
     };
+  }
+
+  /**
+   * Ajoute un peer WireGuard SANS toucher à Corosync
+   * Utilisé par /full-config quand Corosync est déjà configuré
+   */
+  addPeerWgOnly(peer: Omit<MeshPeer, 'persistentKeepalive'>): MeshOperationResult {
+    if (!this.config) {
+      return { success: false, error: 'Aucun mesh configuré.' };
+    }
+
+    if (this.config.peers.some((p) => p.publicKey === peer.publicKey)) {
+      return { success: true, message: 'Peer déjà présent.' };
+    }
+
+    const fullPeer: MeshPeer = {
+      ...peer,
+      persistentKeepalive: DEFAULT_KEEPALIVE,
+    };
+
+    this.config.peers.push(fullPeer);
+    this.saveConfig();
+
+    if (isInterfaceUp(WG_INTERFACE)) {
+      addPeer(WG_INTERFACE, fullPeer);
+    }
+
+    const wgConfig = generateWgQuickConfig(
+      this.config.privateKey,
+      this.config.meshIp,
+      this.config.listenPort,
+      this.config.peers
+    );
+    saveWgQuickConfig(WG_INTERFACE, wgConfig);
+
+    return { success: true, message: `Peer WG ${peer.name} ajouté.` };
   }
 
   /**

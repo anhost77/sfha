@@ -16,6 +16,7 @@ import { getMeshManager, isWireGuardInstalled } from './mesh/index.js';
 import { isServiceActive } from './resources.js';
 import { logger } from './utils/logger.js';
 import { propagateConfigToAllPeers } from './p2p-state.js';
+import { initClusterState, getClusterState, startPropagation, completePropagation, addPeerToState } from './cluster-state.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -28,7 +29,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.58';
+const VERSION = '1.0.60';
 
 function getVersion(): string {
   return VERSION;
@@ -151,16 +152,20 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
       const response = await sendCommand({ action: 'status' });
       
       if (options.json) {
-        // Add phase calculation to daemon response
-        const corosyncRunning = response.data?.corosync?.running ?? false;
-        const corosyncNodesCount = response.data?.corosync?.nodesOnline ?? 0;
-        const phaseInfo = calculateClusterPhase(corosyncRunning, corosyncNodesCount);
+        // Get phase from cluster-state.json (source of truth)
+        const clusterState = getClusterState();
         
         const enrichedData = {
           ...response.data,
-          phase: phaseInfo.phase,
-          wgPeersCount: phaseInfo.wgPeersCount,
-          pendingPeers: phaseInfo.pendingPeers,
+          phase: clusterState?.phase || null,
+          pendingPeers: clusterState?.peers?.length || 0,
+          // Info cluster-state pour le dashboard
+          clusterState: clusterState ? {
+            leaderNode: clusterState.leaderNode,
+            leaderIp: clusterState.leaderIp,
+            leaderPublicIp: clusterState.leaderPublicIp,
+            peers: clusterState.peers,
+          } : null,
         };
         console.log(JSON.stringify(enrichedData, null, 2));
         return;
@@ -178,8 +183,10 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
     const election = electLeader();
     const vips = getVipsState(config.vips);
     
-    // Calculate phase
-    const phaseInfo = calculateClusterPhase(corosync.running, corosync.nodes.filter(n => n.online).length);
+    // Get phase from cluster-state.json (source of truth)
+    const clusterState = getClusterState();
+    const phase = clusterState?.phase || null;
+    const pendingPeers = clusterState?.peers?.length || 0;
     
     if (options.json) {
       console.log(JSON.stringify({
@@ -194,9 +201,15 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
         leader: election?.leaderName,
         isLeader: election?.isLocalLeader,
         vips,
-        phase: phaseInfo.phase,
-        wgPeersCount: phaseInfo.wgPeersCount,
-        pendingPeers: phaseInfo.pendingPeers,
+        phase,
+        pendingPeers,
+        // Info cluster-state pour le dashboard
+        clusterState: clusterState ? {
+          leaderNode: clusterState.leaderNode,
+          leaderIp: clusterState.leaderIp,
+          leaderPublicIp: clusterState.leaderPublicIp,
+          peers: clusterState.peers,
+        } : null,
       }, null, 2));
       return;
     }
@@ -1606,6 +1619,12 @@ async function initCommand(options: {
     }
 
     console.log(colorize('✓', 'green'), result.message);
+    
+    // Initialiser l'état du cluster (phase: initializing)
+    const nodeName = hostname();
+    const meshIp = options.ip!.split('/')[0]; // Extraire l'IP sans le CIDR
+    initClusterState(options.name, nodeName, meshIp, options.endpoint?.split(':')[0]);
+    
     console.log('');
     console.log(colorize('Token de join:', 'blue'));
     console.log('');
@@ -1886,6 +1905,9 @@ async function propagateCommand(options: { timeout?: string; lang?: string }): P
   
   const timeoutMs = parseInt(options.timeout || '10000', 10);
   
+  // Marquer le début de la propagation
+  startPropagation();
+  
   console.log(colorize('⚙', 'blue'), `Propagation de la configuration à ${meshConfig.peers.length} nœud(s)...`);
   console.log();
   
@@ -1893,6 +1915,9 @@ async function propagateCommand(options: { timeout?: string; lang?: string }): P
   
   console.log();
   if (result.success) {
+    // Marquer le cluster comme actif
+    completePropagation();
+    
     console.log(colorize('✓', 'green'), `Propagation terminée: ${result.succeeded}/${result.total} nœuds mis à jour`);
     if (result.failed > 0) {
       console.log(colorize('⚠', 'yellow'), `${result.failed} nœud(s) en échec`);
