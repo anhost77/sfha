@@ -29,6 +29,7 @@ export interface ClusterNode {
   online: boolean;
   isLeader: boolean;
   isLocal: boolean;
+  standby?: boolean;
 }
 
 export interface DaemonStatus {
@@ -1357,13 +1358,22 @@ export class SfhaDaemon extends EventEmitter {
         nodesOnline: nodes.filter((n) => n.online).length,
         nodesTotal: nodes.length,
       },
-      nodes: nodes.map((n) => ({
-        name: n.name,
-        ip: n.ip,
-        online: n.online,
-        isLeader: n.name === leaderName,
-        isLocal: n.nodeId === localNodeId,
-      })),
+      nodes: nodes.map((n) => {
+        const isLocal = n.nodeId === localNodeId;
+        // Pour le node local, utiliser this.standby
+        // Pour les nodes distants, récupérer depuis le P2P state manager
+        const standby = isLocal 
+          ? this.standby 
+          : this.p2pStateManager?.isNodeInStandby(n.name) ?? false;
+        return {
+          name: n.name,
+          ip: n.ip,
+          online: n.online,
+          isLeader: n.name === leaderName,
+          isLocal,
+          standby,
+        };
+      }),
       vips: this.config ? getVipsState(this.config.vips) : [],
       services: (this.resourceManager?.getState() || []).map(svc => ({
         ...svc,

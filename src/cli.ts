@@ -388,8 +388,9 @@ function displayDaemonStatus(data: any): void {
         status = colorize('●', 'green') + ' ' + t('status.online');
       }
       const leader = node.isLeader ? colorize(' (leader)', 'yellow') : '';
+      const standby = node.standby ? colorize(' (standby)', 'gray') : '';
       const local = node.isLocal ? colorize(' *', 'cyan') : '';
-      console.log(`  ${status} ${node.name} (${node.ip})${leader}${local}`);
+      console.log(`  ${status} ${node.name} (${node.ip})${leader}${standby}${local}`);
     }
   }
   

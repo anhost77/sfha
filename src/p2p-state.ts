@@ -153,6 +153,20 @@ export class P2PStateManager {
   }
 
   /**
+   * Vérifie si un nœud distant est en standby
+   * @param nodeName Nom du nœud à vérifier
+   * @returns true si en standby, false sinon, undefined si inconnu
+   */
+  isNodeInStandby(nodeName: string): boolean | undefined {
+    for (const [, state] of this.remoteStates) {
+      if (state.name === nodeName) {
+        return state.standby;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Définit un callback pour les changements d'état
    */
   onStateChange(callback: (states: Map<string, NodeState>) => void): void {
