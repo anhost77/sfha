@@ -203,6 +203,14 @@ export class P2PStateManager {
         return;
       }
       
+      // Info endpoint - returns node hostname for proper naming during propagation
+      // NO AUTH required (called during propagation to get real hostnames)
+      if (req.method === 'GET' && req.url === '/info') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ hostname: os.hostname() }));
+        return;
+      }
+      
       // Add peer endpoint - called by joining nodes to register themselves
       // SECURITY: Requires valid cluster authKey in request
       if (req.method === 'POST' && req.url === '/add-peer') {
@@ -1026,6 +1034,50 @@ function httpPost(
 }
 
 /**
+ * Helper HTTP GET avec timeout configurable
+ */
+function httpGet(
+  host: string,
+  port: number,
+  path: string,
+  timeoutMs: number
+): Promise<{ success: boolean; error?: string; data?: any }> {
+  return new Promise((resolve) => {
+    const options = {
+      hostname: host,
+      port,
+      path,
+      method: 'GET',
+      timeout: timeoutMs,
+    };
+
+    const req = http.request(options, (res) => {
+      let responseData = '';
+      res.on('data', (chunk) => { responseData += chunk; });
+      res.on('end', () => {
+        try {
+          const response = JSON.parse(responseData);
+          resolve({ success: true, data: response });
+        } catch {
+          resolve({ success: false, error: 'Invalid response' });
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      resolve({ success: false, error: err.message });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ success: false, error: 'Timeout' });
+    });
+
+    req.end();
+  });
+}
+
+/**
  * Propage un nouveau peer vers un nœud existant
  * Hybrid bootstrap: essaie d'abord l'IP mesh (2s), puis fallback sur IP publique (5s)
  * Utilisé pour que tous les nœuds connaissent tous les peers WireGuard
@@ -1500,12 +1552,27 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Prom
     nodeId: 1,
   }];
   
-  // Ajouter les peers découverts
+  // Ajouter les peers découverts - récupérer leur vrai hostname d'abord
   let nodeId = 2;
   for (const peer of discoveredPeers) {
     const peerMeshIp = peer.allowedIps.split('/')[0];
+    
+    // Récupérer le vrai hostname du peer via /info
+    let peerHostname = `node-${nodeId}`; // Fallback si /info échoue
+    try {
+      const infoResult = await httpGet(peerMeshIp, 7777, '/info', 3000);
+      if (infoResult.success && infoResult.data?.hostname) {
+        peerHostname = infoResult.data.hostname;
+        logger.info(`  Peer ${peerMeshIp}: hostname="${peerHostname}"`);
+      } else {
+        logger.warn(`  Peer ${peerMeshIp}: /info failed, using fallback name "${peerHostname}"`);
+      }
+    } catch (err: any) {
+      logger.warn(`  Peer ${peerMeshIp}: /info error (${err.message}), using fallback name "${peerHostname}"`);
+    }
+    
     allNodes.push({
-      name: `node-${nodeId}`, // Nom temporaire, sera mis à jour par le peer
+      name: peerHostname,
       publicKey: peer.publicKey,
       endpoint: peer.endpoint,
       meshIp: peerMeshIp,

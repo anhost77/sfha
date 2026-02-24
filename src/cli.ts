@@ -29,7 +29,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.70';
+const VERSION = '1.0.74';
 
 function getVersion(): string {
   return VERSION;
