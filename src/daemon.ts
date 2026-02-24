@@ -6,7 +6,7 @@
 import { EventEmitter } from 'events';
 import { SfhaConfig, loadConfig } from './config.js';
 import { CorosyncWatcher, CorosyncState, isCorosyncRunning, getQuorumStatus, getClusterNodes, getLocalNodeId, publishStandbyState, clearStandbyState } from './corosync.js';
-import { activateAllVips, deactivateAllVips, getVipsState, isAnyVipReachable, VipState } from './vip.js';
+import { activateAllVips, deactivateAllVips, getVipsState, isAnyVipReachable, syncVips, VipState } from './vip.js';
 import { HealthManager, HealthResult } from './health.js';
 import { ResourceManager, ResourceState, restartService, isServiceActive } from './resources.js';
 import { ElectionManager, ElectionResult, electLeader, getNextLeaderCandidate } from './election.js';
@@ -16,7 +16,7 @@ import { t, initI18n } from './i18n.js';
 import { logger, setLogLevel, createSimpleLogger } from './utils/logger.js';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { getMeshManager } from './mesh/index.js';
-import { P2PStateManager, initP2PStateManager, syncMeshPeersFromInitiator, propagateConfigToAllPeers } from './p2p-state.js';
+import { P2PStateManager, initP2PStateManager, syncMeshPeersFromInitiator, propagateVipsToAllPeers } from './p2p-state.js';
 import { startKnockServer, stopKnockServer, authorizePermanently } from './knock.js';
 
 // ============================================
@@ -174,22 +174,32 @@ export class SfhaDaemon extends EventEmitter {
         this.log
       );
       
-      // Si leader, activer les nouvelles VIPs et propager aux autres nœuds
-      if (this.isLeader && this.config.vips.length > 0) {
-        logger.info('Activation des VIPs après rechargement...');
-        activateAllVips(this.config.vips, this.log);
+      // Si leader, synchroniser les VIPs et propager aux autres nœuds
+      // IMPORTANT: On propage UNIQUEMENT les VIPs, pas la config complète
+      // La config complète (Corosync) est propagée uniquement via 'sfha propagate'
+      // lors de l'ajout/suppression de nœuds
+      if (this.isLeader) {
+        // Synchroniser les VIPs (ajoute les nouvelles, supprime les zombies)
+        logger.info('Synchronisation des VIPs après rechargement...');
+        const syncResult = syncVips(this.config.vips, this.log);
+        if (syncResult.added > 0 || syncResult.removed > 0) {
+          logger.info(`VIPs sync: ${syncResult.added} ajoutées, ${syncResult.removed} supprimées`);
+        } else if (this.config.vips.length === 0) {
+          logger.info('Aucune VIP configurée');
+        }
         
-        // Propager automatiquement la config aux autres nœuds (timeout 30s car les peers peuvent être occupés)
-        logger.info('Propagation automatique de la configuration...');
-        propagateConfigToAllPeers(30000).then(result => {
+        // Propager UNIQUEMENT les VIPs aux autres nœuds (même si liste vide)
+        // Ceci synchronise la suppression de VIPs sur tous les nœuds
+        logger.info('Propagation des VIPs aux autres nœuds...');
+        propagateVipsToAllPeers(5000).then(result => {
           if (result.success) {
-            logger.info(`Propagation OK: ${result.succeeded}/${result.total} nœuds mis à jour`);
+            logger.info(`VIPs propagées: ${result.succeeded}/${result.total} nœuds mis à jour`);
           } else if (result.total > 0) {
-            logger.warn(`Propagation partielle: ${result.succeeded}/${result.total} (${result.error || 'erreurs'})`);
+            logger.warn(`Propagation VIPs partielle: ${result.succeeded}/${result.total}`);
           }
           // Si total=0, pas de peers, on ignore silencieusement
         }).catch(err => {
-          logger.warn(`Propagation échouée: ${err.message}`);
+          logger.warn(`Propagation VIPs échouée: ${err.message}`);
         });
       }
     } else {

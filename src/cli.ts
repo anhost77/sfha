@@ -15,7 +15,7 @@ import { initI18n, t } from './i18n.js';
 import { getMeshManager, isWireGuardInstalled } from './mesh/index.js';
 import { isServiceActive } from './resources.js';
 import { logger } from './utils/logger.js';
-import { propagateConfigToAllPeers } from './p2p-state.js';
+import { propagateConfigToAllPeers, propagateVipsToAllPeers, isLocalNodeLeader, forwardVipChangeToLeader } from './p2p-state.js';
 import { initClusterState, getClusterState, startPropagation, completePropagation, addPeerToState } from './cluster-state.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -1481,17 +1481,49 @@ async function vipAddCommand(
       process.exit(1);
     }
     
-    // Add VIP
-    config.vips.push({
+    const vipData = {
       name,
       ip,
       cidr,
       interface: iface,
-    });
+    };
+    
+    // Add VIP to local config
+    config.vips.push(vipData);
     
     // Write config
     writeFileSync(configPath, stringifyYaml(config, { indent: 2 }));
     console.log(colorize('✓', 'green'), `VIP "${name}" ajoutée: ${ip}/${cidr} sur ${iface}`);
+    
+    // Check if we should propagate
+    if (options.propagate !== false) {
+      // Check if we are the leader
+      const weAreLeader = isLocalNodeLeader();
+      
+      if (weAreLeader) {
+        // We are the leader - propagate directly to all peers
+        console.log(colorize('⟳', 'blue'), 'Propagation vers les autres nœuds...');
+        const propagateResult = await propagateVipsToAllPeers();
+        if (propagateResult.success) {
+          console.log(colorize('✓', 'green'), `VIPs propagées à ${propagateResult.succeeded}/${propagateResult.total} nœuds`);
+        } else if (propagateResult.total > 0) {
+          console.warn(colorize('⚠', 'yellow'), `Propagation partielle: ${propagateResult.succeeded}/${propagateResult.total} nœuds`);
+        }
+      } else {
+        // We are a follower - forward to leader
+        console.log(colorize('⟳', 'blue'), 'Envoi au leader pour propagation...');
+        const forwardResult = await forwardVipChangeToLeader({
+          action: 'add',
+          vip: vipData,
+        });
+        if (forwardResult.success) {
+          console.log(colorize('✓', 'green'), forwardResult.message || 'VIP propagée via le leader');
+        } else {
+          console.warn(colorize('⚠', 'yellow'), 'Propagation échouée:', forwardResult.error);
+          console.log(colorize('ℹ', 'gray'), 'La VIP a été ajoutée localement mais pas propagée aux autres nœuds');
+        }
+      }
+    }
     
     // Reload if requested
     if (options.reload !== false) {
@@ -1545,7 +1577,46 @@ async function vipRemoveCommand(
     
     // Write config
     writeFileSync(configPath, stringifyYaml(config, { indent: 2 }));
-    console.log(colorize('✓', 'green'), `VIP "${name}" supprimée (${removed.ip}/${removed.cidr})`);
+    console.log(colorize('✓', 'green'), `VIP "${name}" supprimée de la config (${removed.ip}/${removed.cidr})`);
+    
+    // Remove VIP from network interface
+    const { removeVip } = await import('./vip.js');
+    const vipConfig = { name: removed.name, ip: removed.ip, cidr: removed.cidr, interface: removed.interface || 'eth0' };
+    if (removeVip(vipConfig, (msg) => console.log(colorize('ℹ', 'gray'), msg))) {
+      console.log(colorize('✓', 'green'), `VIP ${removed.ip} supprimée de l'interface`);
+    } else {
+      console.warn(colorize('⚠', 'yellow'), `Impossible de supprimer ${removed.ip} de l'interface (peut-être déjà absente)`);
+    }
+    
+    // Check if we should propagate
+    if (options.propagate !== false) {
+      // Check if we are the leader
+      const weAreLeader = isLocalNodeLeader();
+      
+      if (weAreLeader) {
+        // We are the leader - propagate directly to all peers
+        console.log(colorize('⟳', 'blue'), 'Propagation vers les autres nœuds...');
+        const propagateResult = await propagateVipsToAllPeers();
+        if (propagateResult.success) {
+          console.log(colorize('✓', 'green'), `VIPs propagées à ${propagateResult.succeeded}/${propagateResult.total} nœuds`);
+        } else if (propagateResult.total > 0) {
+          console.warn(colorize('⚠', 'yellow'), `Propagation partielle: ${propagateResult.succeeded}/${propagateResult.total} nœuds`);
+        }
+      } else {
+        // We are a follower - forward to leader
+        console.log(colorize('⟳', 'blue'), 'Envoi au leader pour propagation...');
+        const forwardResult = await forwardVipChangeToLeader({
+          action: 'remove',
+          vipName: name,
+        });
+        if (forwardResult.success) {
+          console.log(colorize('✓', 'green'), forwardResult.message || 'VIP supprimée via le leader');
+        } else {
+          console.warn(colorize('⚠', 'yellow'), 'Propagation échouée:', forwardResult.error);
+          console.log(colorize('ℹ', 'gray'), 'La VIP a été supprimée localement mais pas propagée aux autres nœuds');
+        }
+      }
+    }
     
     // Reload if requested
     if (options.reload !== false) {

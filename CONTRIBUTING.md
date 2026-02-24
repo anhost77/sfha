@@ -1,124 +1,124 @@
-# Contribuer à sfha
+# Contributing to sfha
 
-Merci de votre intérêt pour contribuer à sfha ! 🎉
+Thank you for your interest in contributing to sfha! 🎉
 
-## 🇫🇷 Langue
+## 🌍 Language
 
-Ce projet est développé principalement en français. Les commits, issues et PR peuvent être rédigés en français ou en anglais.
+This project is developed primarily in French. Commits, issues, and PRs can be written in French or English.
 
-## 🚀 Comment contribuer
+## 🚀 How to Contribute
 
-### Signaler un bug
+### Reporting a Bug
 
-1. Vérifiez que le bug n'a pas déjà été signalé dans les [Issues](https://github.com/serverflow/sfha/issues)
-2. Créez une nouvelle issue avec le template "Bug Report"
-3. Incluez :
-   - Version de sfha (`sfha --version`)
-   - Distribution et version (Debian 12, Ubuntu 24.04...)
-   - Étapes pour reproduire
-   - Comportement attendu vs observé
-   - Logs pertinents (`journalctl -u sfha`)
+1. Check if the bug hasn't already been reported in [Issues](https://github.com/anhost77/sfha/issues)
+2. Create a new issue using the "Bug Report" template
+3. Include:
+   - sfha version (`sfha --version`)
+   - Distribution and version (Debian 12, Ubuntu 24.04...)
+   - Steps to reproduce
+   - Expected vs observed behavior
+   - Relevant logs (`journalctl -u sfha`)
 
-### Proposer une fonctionnalité
+### Proposing a Feature
 
-1. Ouvrez une issue avec le template "Feature Request"
-2. Décrivez le cas d'usage
-3. Attendez la discussion avant de coder
+1. Open an issue using the "Feature Request" template
+2. Describe the use case
+3. Wait for discussion before coding
 
-### Soumettre du code
+### Submitting Code
 
-1. **Fork** le repository
-2. **Clone** votre fork :
+1. **Fork** the repository
+2. **Clone** your fork:
    ```bash
-   git clone https://github.com/VOTRE-USER/sfha.git
+   git clone https://github.com/YOUR-USER/sfha.git
    cd sfha
    ```
-3. **Créez une branche** :
+3. **Create a branch**:
    ```bash
-   git checkout -b feature/ma-super-feature
-   # ou
-   git checkout -b fix/correction-bug
+   git checkout -b feature/my-awesome-feature
+   # or
+   git checkout -b fix/bug-fix
    ```
-4. **Installez les dépendances** :
+4. **Install dependencies**:
    ```bash
-   npm install
+   pnpm install
    ```
-5. **Faites vos modifications**
-6. **Testez** :
+5. **Make your changes**
+6. **Test**:
    ```bash
-   npm run build
-   npm test
+   pnpm build
+   pnpm test
    ```
-7. **Commitez** avec un message clair :
+7. **Commit** with a clear message:
    ```bash
-   git commit -m "feat: ajout du driver STONITH IPMI"
-   # ou
-   git commit -m "fix: correction détection quorum"
+   git commit -m "feat: add IPMI STONITH driver"
+   # or
+   git commit -m "fix: correct quorum detection"
    ```
-8. **Push** :
+8. **Push**:
    ```bash
-   git push origin feature/ma-super-feature
+   git push origin feature/my-awesome-feature
    ```
-9. **Ouvrez une Pull Request**
+9. **Open a Pull Request**
 
-## 📝 Style de code
+## 📝 Code Style
 
-- **TypeScript** : Tout le code source est en TypeScript
-- **Pas de `any`** : Typage strict
-- **Fonctions pures** quand possible
-- **Commentaires** en français ou anglais
-- **Nommage** : camelCase pour les variables/fonctions, PascalCase pour les types/classes
+- **TypeScript**: All source code is TypeScript
+- **No `any`**: Strict typing
+- **Pure functions** when possible
+- **Comments** in French or English
+- **Naming**: camelCase for variables/functions, PascalCase for types/classes
 
-### Structure des commits
+### Commit Style
 
-Nous suivons [Conventional Commits](https://www.conventionalcommits.org/) :
+We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-type(scope): description courte
+type(scope): short description
 
-Corps optionnel avec plus de détails.
+Optional body with more details.
 ```
 
-Types :
-- `feat` : Nouvelle fonctionnalité
-- `fix` : Correction de bug
-- `docs` : Documentation
-- `refactor` : Refactoring sans changement fonctionnel
-- `test` : Ajout/modification de tests
-- `chore` : Maintenance (deps, CI...)
+Types:
+- `feat`: New feature
+- `fix`: Bug fix
+- `docs`: Documentation
+- `refactor`: Refactoring without functional change
+- `test`: Adding/modifying tests
+- `chore`: Maintenance (deps, CI...)
 
 ## 🏗️ Architecture
 
 ```
 src/
-├── cli.ts        # Interface CLI (Commander.js)
-├── daemon.ts     # Démon principal
-├── control.ts    # Socket Unix de contrôle
-├── corosync.ts   # Intégration Corosync
-├── election.ts   # Élection du leader
-├── vip.ts        # Gestion VIP
+├── cli.ts        # CLI interface (Commander.js)
+├── daemon.ts     # Main daemon
+├── control.ts    # Unix control socket
+├── corosync.ts   # Corosync integration
+├── election.ts   # Leader election
+├── vip.ts        # VIP management
 ├── health.ts     # Health checks
-├── resources.ts  # Services systemd
-├── config.ts     # Parsing YAML
-├── i18n.ts       # Internationalisation
-├── mesh/         # Module mesh WireGuard
-└── stonith/      # Module STONITH
+├── resources.ts  # Systemd services
+├── config.ts     # YAML parsing
+├── i18n.ts       # Internationalization
+├── mesh/         # WireGuard mesh module
+└── stonith/      # STONITH module
     ├── index.ts      # FenceCoordinator
     └── drivers/      # Drivers (Proxmox, etc.)
 ```
 
-## ✅ Checklist PR
+## ✅ PR Checklist
 
-- [ ] Le code compile (`npm run build`)
-- [ ] Les tests passent (`npm test`)
-- [ ] La documentation est à jour si nécessaire
-- [ ] Les traductions FR/EN sont ajoutées si nouveaux messages CLI
-- [ ] Le CHANGELOG.md est mis à jour
+- [ ] Code compiles (`pnpm build`)
+- [ ] Tests pass (`pnpm test`)
+- [ ] Documentation updated if needed
+- [ ] FR/EN translations added if new CLI messages
+- [ ] CHANGELOG.md updated
 
-## 🙋 Questions ?
+## 🙋 Questions?
 
-Ouvrez une issue avec le label `question` ou contactez-nous.
+Open an issue with the `question` label or contact us.
 
 ---
 
-Merci de contribuer à rendre la HA plus simple ! 🚀
+Thanks for helping make HA simpler! 🚀

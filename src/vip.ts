@@ -58,6 +58,66 @@ function runCommandOutput(cmd: string): string {
 // ============================================
 
 /**
+ * Liste les IPs secondaires présentes sur une interface
+ * (exclut l'IP principale)
+ */
+export function getSecondaryIpsOnInterface(iface: string): Array<{ ip: string; cidr: number }> {
+  const output = runCommandOutput(`ip -4 addr show dev ${iface}`);
+  const ips: Array<{ ip: string; cidr: number }> = [];
+  
+  // Match lines like "inet 192.168.1.200/24 scope global secondary eth0"
+  const regex = /inet\s+(\d+\.\d+\.\d+\.\d+)\/(\d+).*secondary/g;
+  let match;
+  while ((match = regex.exec(output)) !== null) {
+    ips.push({ ip: match[1], cidr: parseInt(match[2], 10) });
+  }
+  return ips;
+}
+
+/**
+ * Synchronise les VIPs sur l'interface avec la config
+ * - Supprime les VIPs qui ne sont plus dans la config
+ * - Ajoute les VIPs qui manquent
+ */
+export function syncVips(vips: VipConfig[], log?: (msg: string) => void): { added: number; removed: number } {
+  const logFn = log || console.log;
+  const result = { added: 0, removed: 0 };
+  
+  // Get all interfaces mentioned in config (default to eth0)
+  const interfaces = new Set(vips.map(v => v.interface || 'eth0'));
+  if (interfaces.size === 0) interfaces.add('eth0');
+  
+  // For each interface, sync VIPs
+  for (const iface of interfaces) {
+    const currentIps = getSecondaryIpsOnInterface(iface);
+    const configIps = vips.filter(v => (v.interface || 'eth0') === iface).map(v => v.ip);
+    
+    // Remove IPs that are not in config
+    for (const current of currentIps) {
+      if (!configIps.includes(current.ip)) {
+        logFn(`🧹 Nettoyage VIP zombie: ${current.ip}/${current.cidr} sur ${iface}`);
+        const delResult = runCommand(`ip addr del ${current.ip}/${current.cidr} dev ${iface}`);
+        if (delResult.success) {
+          result.removed++;
+        }
+      }
+    }
+    
+    // Add IPs that are missing
+    const currentIpSet = new Set(currentIps.map(c => c.ip));
+    for (const vip of vips.filter(v => (v.interface || 'eth0') === iface)) {
+      if (!currentIpSet.has(vip.ip)) {
+        if (addVip(vip, logFn)) {
+          result.added++;
+        }
+      }
+    }
+  }
+  
+  return result;
+}
+
+/**
  * Vérifie si une VIP est présente sur l'interface
  */
 export function hasVip(vip: VipConfig): boolean {

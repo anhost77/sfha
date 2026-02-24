@@ -8,7 +8,7 @@
      Simple. Fast. High Availability.
 ```
 
-# sfha — Haute Disponibilité légère pour Linux
+# sfha — Lightweight High Availability for Linux
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-1.0.70-green.svg)](package.json)
@@ -16,70 +16,70 @@
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%2B-orange.svg)](https://ubuntu.com/)
 [![Made in France](https://img.shields.io/badge/Made%20in-France%20🇫🇷-blue.svg)](#)
 
-**sfha** (Simple Fast High Availability) est un système de haute disponibilité léger et moderne, conçu comme alternative minimaliste à Pacemaker.
+**sfha** (Simple Fast High Availability) is a lightweight, modern high availability system designed as a minimalist alternative to Pacemaker.
 
-🚀 **~12K lignes TypeScript** | 📦 **15MB standalone** | ⚡ **Zéro I/O disque** | 🇫🇷 **CLI en français**
-
----
-
-## ✨ Fonctionnalités
-
-| Fonctionnalité | Description |
-|----------------|-------------|
-| 🔄 **VIP flottante** | Failover automatique des adresses IP virtuelles (~5s) |
-| 🌐 **Mesh WireGuard** | Réseau chiffré intégré avec `init`/`join` simple |
-| 🔫 **STONITH** | Fencing via API Proxmox ou Webhook (extensible) |
-| 🛡️ **Détection conflits IP** | Vérifie les collisions avant activation (arping) |
-| 💓 **Health checks** | HTTP, TCP, systemd avec hystérésis configurable |
-| 🤝 **Quorum Corosync** | Intégration native avec votequorum |
-| 🔁 **Propagation auto** | Config VIP/services synchronisée sur tous les nœuds |
-| 🇫🇷 **Multilingue** | Français par défaut, `--lang=en` disponible |
-| 📊 **CLI complète** | Status, resources, failover, standby, propagate... |
+🚀 **~12K lines TypeScript** | 📦 **15MB standalone** | ⚡ **Zero disk I/O** | 🌐 **Multilingual CLI**
 
 ---
 
-## 📦 Installation rapide
+## ✨ Features
+
+| Feature | Description |
+|---------|-------------|
+| 🔄 **Floating VIP** | Automatic virtual IP failover (~5s) |
+| 🌐 **WireGuard Mesh** | Built-in encrypted network with simple `init`/`join` |
+| 🔫 **STONITH** | Fencing via Proxmox API or Webhook (extensible) |
+| 🛡️ **IP Conflict Detection** | Checks for collisions before activation (arping) |
+| 💓 **Health Checks** | HTTP, TCP, systemd with configurable hysteresis |
+| 🤝 **Corosync Quorum** | Native integration with votequorum |
+| 🔁 **Auto Propagation** | VIP/services config synced across all nodes |
+| 🌍 **Multilingual** | French by default, `--lang=en` available |
+| 📊 **Full CLI** | Status, resources, failover, standby, propagate... |
+
+---
+
+## 📦 Quick Install
 
 ```bash
-# Télécharger le .deb depuis les releases GitHub
+# Download the .deb from GitHub releases
 wget https://github.com/anhost77/sfha/releases/latest/download/sfha_1.0.70_amd64.deb
 
-# Installer (aucune dépendance requise sauf corosync)
+# Install (no dependencies required except corosync)
 sudo dpkg -i sfha_1.0.70_amd64.deb
 
-# Vérifier l'installation
+# Verify installation
 sfha --version
 ```
 
-### Prérequis
+### Prerequisites
 
-- **OS** : Debian 11/12/13, Ubuntu 22.04/24.04
-- **Node.js** : ❌ **Non requis** (embarqué dans le .deb)
-- **Corosync** : Installé automatiquement comme dépendance
-- **WireGuard** : `apt install wireguard-tools` (**obligatoire** pour le mesh P2P)
+- **OS**: Debian 11/12/13, Ubuntu 22.04/24.04
+- **Node.js**: ❌ **Not required** (bundled in the .deb)
+- **Corosync**: Automatically installed as dependency
+- **WireGuard**: `apt install wireguard-tools` (**required** for P2P mesh)
 
-### Ports réseau requis
+### Required Network Ports
 
-| Port | Protocole | Usage |
-|------|-----------|-------|
-| 5405 | UDP | Corosync (communication cluster) |
+| Port | Protocol | Usage |
+|------|----------|-------|
+| 5405 | UDP | Corosync (cluster communication) |
 | 51820 | UDP | WireGuard mesh |
-| **7777** | TCP | **Coordination P2P sfha** (sur IP mesh uniquement) |
+| **7777** | TCP | **sfha P2P coordination** (mesh IP only) |
 
-> ⚠️ **WireGuard est obligatoire.** Le port 7777 est utilisé pour la synchronisation de l'état entre nœuds et n'écoute que sur l'interface mesh WireGuard (10.x.x.x) pour des raisons de sécurité.
+> ⚠️ **WireGuard is mandatory.** Port 7777 is used for state synchronization between nodes and only listens on the WireGuard mesh interface (10.x.x.x) for security reasons.
 
 ---
 
 ## 🚀 Quick Start
 
-### Étape 1 : Initialiser le cluster (nœud leader)
+### Step 1: Initialize the cluster (leader node)
 
 ```bash
-# Initialiser avec mesh WireGuard intégré
-sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24 --endpoint <IP_PUBLIQUE>
+# Initialize with built-in WireGuard mesh
+sudo sfha init --name my-cluster --mesh --ip 10.100.0.1/24 --endpoint <PUBLIC_IP>
 
-# Avec STONITH Proxmox (optionnel)
-sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24 --endpoint <IP_PUBLIQUE> \
+# With Proxmox STONITH (optional)
+sudo sfha init --name my-cluster --mesh --ip 10.100.0.1/24 --endpoint <PUBLIC_IP> \
   --stonith proxmox \
   --proxmox-url https://192.168.1.100:8006 \
   --proxmox-token root@pam!sfha \
@@ -87,46 +87,46 @@ sudo sfha init --name mon-cluster --mesh --ip 10.100.0.1/24 --endpoint <IP_PUBLI
   --pve-node pve01 \
   --vmid 101
 
-# Ou configuration interactive STONITH
+# Or interactive STONITH setup
 sudo sfha stonith setup
 
-# ➜ Copier le token affiché pour les autres nœuds
+# ➜ Copy the displayed token for other nodes
 ```
 
-### Étape 2 : Rejoindre le cluster (autres nœuds)
+### Step 2: Join the cluster (other nodes)
 
 ```bash
-# Sur chaque nœud secondaire : établit uniquement le tunnel WireGuard
-sudo sfha join <token> --endpoint <IP_PUBLIQUE_DU_NOEUD>
+# On each secondary node: establishes WireGuard tunnel only
+sudo sfha join <token> --endpoint <NODE_PUBLIC_IP>
 ```
 
-> ℹ️ **Note :** `sfha join` établit uniquement le tunnel WireGuard vers le leader. 
-> Il n'y a pas encore de Corosync ni de full-mesh à cette étape.
+> ℹ️ **Note:** `sfha join` only establishes the WireGuard tunnel to the leader. 
+> There's no Corosync or full-mesh at this stage yet.
 
-### Étape 3 : Propager la configuration (sur le leader)
+### Step 3: Propagate configuration (on the leader)
 
 ```bash
-# Une fois tous les nœuds joints, exécuter sur le LEADER :
+# Once all nodes have joined, run on the LEADER:
 sudo sfha propagate
 ```
 
-Cette commande :
-- 🔍 Découvre tous les peers WireGuard connectés
-- 🌐 Configure le full-mesh WireGuard (tous les nœuds se connaissent)
-- ⚙️ Génère et distribue la configuration Corosync
-- 🚀 Démarre les daemons sur tous les nœuds
+This command:
+- 🔍 Discovers all connected WireGuard peers
+- 🌐 Configures full-mesh WireGuard (all nodes know each other)
+- ⚙️ Generates and distributes Corosync configuration
+- 🚀 Starts daemons on all nodes
 
 ```
-✓ Propagation terminée: 3/3 nœuds mis à jour
+✓ Propagation complete: 3/3 nodes updated
 ```
 
-### Configurer les ressources
+### Configure Resources
 
-Éditez `/etc/sfha/config.yml` :
+Edit `/etc/sfha/config.yml`:
 
 ```yaml
 cluster:
-  name: mon-cluster
+  name: my-cluster
   quorum_required: true
   failover_delay_ms: 3000
 
@@ -134,14 +134,14 @@ node:
   name: node1
   priority: 100
 
-# VIP flottante
+# Floating VIP
 vips:
   - name: vip-web
     ip: 192.168.1.100
     cidr: 24
     interface: eth0
 
-# Service géré
+# Managed service
 services:
   - name: nginx
     type: systemd
@@ -152,14 +152,14 @@ services:
       interval_ms: 5000
       failures_before_unhealthy: 3
 
-# Contraintes
+# Constraints
 constraints:
   - type: colocation
     resource: nginx
     with: vip-web
 ```
 
-### Démarrer
+### Start
 
 ```bash
 sudo systemctl enable --now sfha
@@ -168,55 +168,55 @@ sfha status
 
 ---
 
-## 💻 Commandes CLI
+## 💻 CLI Commands
 
 ```bash
-# Statut du cluster
-sfha status              # Vue d'ensemble
-sfha status --json       # Sortie JSON
+# Cluster status
+sfha status              # Overview
+sfha status --json       # JSON output
 
-# Ressources
-sfha resources           # Liste des ressources
-sfha health              # État des health checks
+# Resources
+sfha resources           # List resources
+sfha health              # Health check status
 
-# Contrôle
-sfha failover            # Forcer un basculement
-sfha standby             # Mettre en standby
-sfha unstandby           # Réactiver
-sfha reload              # Recharger la config
+# Control
+sfha failover            # Force failover
+sfha standby             # Put node in standby
+sfha unstandby           # Reactivate node
+sfha reload              # Reload config
 
-# Mesh WireGuard
-sfha mesh status         # État du mesh
-sfha mesh token          # Générer un nouveau token
+# WireGuard mesh
+sfha mesh status         # Mesh status
+sfha mesh token          # Generate new token
 
 # Cluster
-sfha propagate           # Propager la config à tous les nœuds (depuis le leader)
+sfha propagate           # Propagate config to all nodes (from leader)
 
 # STONITH
-sfha stonith status      # État du fencing
-sfha stonith setup       # Configuration interactive
-sfha stonith fence node2 # Fence manuel
-sfha stonith unfence node2 # Rallumer un nœud
-sfha stonith history     # Historique
+sfha stonith status      # Fencing status
+sfha stonith setup       # Interactive setup
+sfha stonith fence node2 # Manual fence
+sfha stonith unfence node2 # Power on a node
+sfha stonith history     # History
 
 # Configuration
-sfha config-check        # Valider la config
-sfha config-example      # Afficher un exemple
+sfha config-check        # Validate config
+sfha config-example      # Show example
 
-# Options globales
-sfha --lang=en status    # Interface en anglais
-sfha --debug run         # Mode debug
+# Global options
+sfha --lang=en status    # English interface
+sfha --debug run         # Debug mode
 ```
 
 ---
 
-## ⚙️ Configuration complète
+## ⚙️ Full Configuration
 
 <details>
-<summary>📄 Exemple complet /etc/sfha/config.yml</summary>
+<summary>📄 Complete /etc/sfha/config.yml example</summary>
 
 ```yaml
-# sfha v1.0.0 - Configuration complète
+# sfha v1.0.0 - Complete configuration
 
 cluster:
   name: production
@@ -255,7 +255,7 @@ services:
       type: tcp
       target: "127.0.0.1:5432"
 
-# Contraintes
+# Constraints
 constraints:
   - type: colocation
     resource: nginx
@@ -264,7 +264,7 @@ constraints:
     first: vip-main
     then: nginx
 
-# STONITH (optionnel)
+# STONITH (optional)
 stonith:
   enabled: true
   provider: proxmox
@@ -295,26 +295,26 @@ logging:
 
 ---
 
-## 🆚 Positionnement
+## 🆚 Positioning
 
-sfha se positionne entre keepalived (trop simple) et Pacemaker (trop complexe) :
+sfha sits between keepalived (too simple) and Pacemaker (too complex):
 
-| Critère | keepalived | sfha | Pacemaker |
-|---------|------------|------|-----------|
-| **Complexité** | Minimale | Modérée | Élevée |
-| **Configuration** | Config texte | **YAML simple** | XML complexe |
-| **I/O disque** | Faible | **Zéro** | Élevé (CIB XML) |
+| Criteria | keepalived | sfha | Pacemaker |
+|----------|------------|------|-----------|
+| **Complexity** | Minimal | Moderate | High |
+| **Configuration** | Text config | **Simple YAML** | Complex XML |
+| **Disk I/O** | Low | **Zero** | High (CIB XML) |
 | **STONITH/Fencing** | ❌ | Proxmox + Webhook | 100+ agents |
-| **Mesh chiffré** | ❌ | **WireGuard intégré** | ❌ |
+| **Encrypted mesh** | ❌ | **Built-in WireGuard** | ❌ |
 | **Health checks** | VRRP scripts | **HTTP/TCP/systemd** | Via agents |
-| **Propagation auto** | ❌ | **Oui (reload)** | ❌ |
-| **Cas d'usage** | VIP simple | 2-10 nœuds, VIPs + services | Clusters complexes |
+| **Auto propagation** | ❌ | **Yes (reload)** | ❌ |
+| **Use case** | Simple VIP | 2-10 nodes, VIPs + services | Complex clusters |
 
 ---
 
-## 🔌 STONITH Webhook (API externe)
+## 🔌 STONITH Webhook (External API)
 
-Pour intégrer avec des APIs externes (cloud, custom, etc.) :
+For integration with external APIs (cloud, custom, etc.):
 
 ```yaml
 stonith:
@@ -333,20 +333,20 @@ stonith:
     verify_ssl: true
 ```
 
-Les variables `{{node}}` et `{{action}}` sont remplacées automatiquement.
+Variables `{{node}}` and `{{action}}` are automatically replaced.
 
 ---
 
-## 💓 Health Checks Standalone
+## 💓 Standalone Health Checks
 
-Vérifier des services indépendamment des resources :
+Monitor services independently of resources:
 
 ```yaml
 health_checks:
   - name: ssh
     type: tcp
     target: 127.0.0.1:22
-    interval: 10        # secondes
+    interval: 10        # seconds
     timeout: 5
     failures_before_unhealthy: 3
     successes_before_healthy: 2
@@ -358,23 +358,23 @@ health_checks:
     timeout: 3
 ```
 
-Vérifier : `sfha health`
+Check with: `sfha health`
 
 ---
 
-### sfha est fait pour vous si...
+### sfha is for you if...
 
-✅ Vous gérez 2-10 nœuds avec VIPs et services  
-✅ Vous voulez une config YAML lisible en 5 minutes  
-✅ Vous avez Proxmox et voulez du STONITH simple  
-✅ Vous voulez un mesh chiffré auto-configuré  
-✅ Vous voulez une propagation automatique des configs  
+✅ You manage 2-10 nodes with VIPs and services  
+✅ You want readable YAML config in 5 minutes  
+✅ You have Proxmox and want simple STONITH  
+✅ You want an auto-configured encrypted mesh  
+✅ You want automatic config propagation  
 
-### sfha n'est PAS fait pour vous si...
+### sfha is NOT for you if...
 
-❌ Vous avez besoin de ressources clonées/multi-state  
-❌ Vous gérez 50+ nœuds en production  
-❌ Vous avez besoin de fence-agents matériels (IPMI, iLO, DRAC...)  
+❌ You need cloned/multi-state resources  
+❌ You manage 50+ nodes in production  
+❌ You need hardware fence agents (IPMI, iLO, DRAC...)  
 
 ---
 
@@ -382,22 +382,22 @@ Vérifier : `sfha health`
 
 | Document | Description |
 |----------|-------------|
-| [Configuration complète](docs/CONFIGURATION.md) | Toutes les options |
-| [Architecture](docs/ARCHITECTURE.md) | Design interne |
-| [STONITH Proxmox](docs/STONITH.md) | Guide fencing |
-| [Mesh WireGuard](docs/MESH.md) | Guide réseau |
-| [Troubleshooting](docs/TROUBLESHOOTING.md) | Résolution de problèmes |
+| [Full Configuration](docs/CONFIGURATION.md) | All options |
+| [Architecture](docs/ARCHITECTURE.md) | Internal design |
+| [STONITH Proxmox](docs/STONITH.md) | Fencing guide |
+| [WireGuard Mesh](docs/MESH.md) | Network guide |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Problem solving |
 
 ---
 
-## 🛠️ Développement
+## 🛠️ Development
 
 ```bash
-# Cloner
+# Clone
 git clone https://github.com/anhost77/sfha.git
 cd sfha
 
-# Installer les dépendances
+# Install dependencies
 pnpm install
 
 # Build TypeScript
@@ -406,41 +406,38 @@ pnpm build
 # Tests
 pnpm test
 
-# Construire le .deb standalone (Node.js embarqué, ~27MB)
-./scripts/build-deb-standalone.sh
-
-# Ou construire le .deb léger (nécessite Node.js sur la cible, ~3.6MB)
-./scripts/build-deb-nodejs.sh
+# Build standalone .deb (bundled Node.js, ~15MB)
+./scripts/build-deb.sh
 ```
 
-### Scripts de build
+### Build Scripts
 
-| Script | Taille | Node.js requis |
-|--------|--------|----------------|
-| `build-deb.sh` | ~15MB | ❌ Non (binaire standalone) |
-
----
-
-## 🤝 Contribuer
-
-Les contributions sont les bienvenues ! Voir [CONTRIBUTING.md](CONTRIBUTING.md).
-
-1. Fork le projet
-2. Créer une branche (`git checkout -b feature/ma-feature`)
-3. Commit (`git commit -m 'Ajout de ma feature'`)
-4. Push (`git push origin feature/ma-feature`)
-5. Ouvrir une Pull Request
+| Script | Size | Node.js required |
+|--------|------|------------------|
+| `build-deb.sh` | ~15MB | ❌ No (standalone binary) |
 
 ---
 
-## 📄 Licence
+## 🤝 Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+1. Fork the project
+2. Create a branch (`git checkout -b feature/my-feature`)
+3. Commit (`git commit -m 'Add my feature'`)
+4. Push (`git push origin feature/my-feature`)
+5. Open a Pull Request
+
+---
+
+## 📄 License
 
 [MIT](LICENSE) © [ServerFlow](https://serverflow.io)
 
 ---
 
 <p align="center">
-  🇫🇷 <strong>Made in France</strong> avec ❤️
+  🇫🇷 <strong>Made in France</strong> with ❤️
   <br>
-  <sub>Par des admins sys, pour des admins sys.</sub>
+  <sub>By sysadmins, for sysadmins.</sub>
 </p>

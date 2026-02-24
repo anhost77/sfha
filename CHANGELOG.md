@@ -1,160 +1,160 @@
 # Changelog
 
-Toutes les modifications notables de ce projet seront documentées dans ce fichier.
+All notable changes to this project will be documented in this file.
 
-Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/),
-et ce projet adhère au [Versionnement Sémantique](https://semver.org/lang/fr/).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.0.70] - 2026-02-24
 
-### Ajouté
+### Added
 
-- **Commandes VIP CLI** : gestion des VIPs sans éditer manuellement le YAML
-  - `sfha vip list` : liste les VIPs configurées
-  - `sfha vip add <name> <ip/cidr> [interface]` : ajoute une VIP
-  - `sfha vip remove <name>` : supprime une VIP
-  - Auto-reload après modification (désactivable avec `--no-reload`)
+- **VIP CLI commands**: manage VIPs without manually editing YAML
+  - `sfha vip list`: list configured VIPs
+  - `sfha vip add <name> <ip/cidr> [interface]`: add a VIP
+  - `sfha vip remove <name>`: remove a VIP
+  - Auto-reload after modification (disable with `--no-reload`)
 
 ---
 
 ## [1.0.69] - 2026-02-24
 
-### Ajouté
+### Added
 
-- **Propagation automatique au reload** : quand le leader fait `sfha reload`, la config est automatiquement propagée à tous les nœuds
-- **Debug logs dans handleLeaderChange** : meilleur diagnostic de l'activation des ressources
+- **Automatic propagation on reload**: when the leader runs `sfha reload`, config is automatically propagated to all nodes
+- **Debug logs in handleLeaderChange**: better resource activation diagnostics
 
-### Corrigé
+### Fixed
 
-- **Fix import dynamique yaml** : remplacé `await import('yaml')` par import statique (compatibilité bundling pkg)
-- **Fix systemd restart LXC** : ajout `KillMode=process` et `ExecStop` pour un arrêt propre dans les containers
-- **Timeout propagation** : augmenté de 5s à 30s pour éviter les échecs sur nœuds occupés
+- **Fix dynamic yaml import**: replaced `await import('yaml')` with static import (pkg bundling compatibility)
+- **Fix systemd restart in LXC**: added `KillMode=process` and `ExecStop` for clean shutdown in containers
+- **Propagation timeout**: increased from 5s to 30s to avoid failures on busy nodes
 
 ---
 
 ## [1.0.67] - 2026-02-24
 
-### Corrigé
+### Fixed
 
-- **Fix "A dynamic import callback was not specified"** : erreur fatale lors de la propagation causée par `import('yaml')` dynamique incompatible avec pkg
+- **Fix "A dynamic import callback was not specified"**: fatal error during propagation caused by dynamic `import('yaml')` incompatible with pkg
 
 ---
 
 ## [1.0.66] - 2026-02-24
 
-### Corrigé
+### Fixed
 
-- **Fix activation VIP au démarrage** : les ressources s'activent maintenant correctement quand le daemon devient leader
-- **Ajout appel explicite à handleLeaderChange** dans checkElection() pour garantir l'activation
+- **Fix VIP activation at startup**: resources now activate correctly when daemon becomes leader
+- **Added explicit handleLeaderChange call** in checkElection() to guarantee activation
 
 ---
 
 ## [1.0.65] - 2026-02-24
 
-### Modifié
+### Changed
 
-- **Timeout propagation** : 5s → 30s pour éviter les échecs sur nœuds occupés à activer leurs VIPs
+- **Propagation timeout**: 5s → 30s to avoid failures on nodes busy activating their VIPs
 
 ---
 
 ## [1.0.64] - 2026-02-24
 
-### Ajouté
+### Added
 
-- **Propagation automatique** : `reload()` sur le leader déclenche automatiquement la propagation aux autres nœuds
+- **Automatic propagation**: `reload()` on the leader automatically triggers propagation to other nodes
 
 ---
 
 ## [1.0.63] - 2026-02-24
 
-### Ajouté
+### Added
 
-- **Propagation des VIPs** : la commande `propagate` inclut maintenant les VIPs, services et constraints du leader
+- **VIP propagation**: the `propagate` command now includes VIPs, services and constraints from the leader
 
-### Corrigé
+### Fixed
 
-- **Config YAML complète** : le handler `/full-config` génère maintenant un YAML complet avec toutes les VIPs
+- **Complete YAML config**: the `/full-config` handler now generates complete YAML with all VIPs
 
 ---
 
 ## [1.0.62] - 2026-02-23
 
-### Corrigé
+### Fixed
 
-- **Activation VIP après reload** : nouvelles VIPs activées automatiquement sur le leader lors d'un `sfha reload`
+- **VIP activation after reload**: new VIPs automatically activated on the leader during `sfha reload`
 
 ---
 
 ## [1.0.61] - 2026-02-23
 
-### Corrigé
+### Fixed
 
-- **Null checks arrays** : protection contre les crashes quand vips/services/constraints sont undefined
-- **Propagation ordre** : Corosync config créée AVANT l'ajout des peers WireGuard
-- **addPeerWgOnly()** : nouvelle fonction pour ajouter un peer WG sans toucher à Corosync
+- **Null checks arrays**: protection against crashes when vips/services/constraints are undefined
+- **Propagation order**: Corosync config created BEFORE adding WireGuard peers
+- **addPeerWgOnly()**: new function to add a WG peer without touching Corosync
 
 ---
 
 ## [1.0.60] - 2026-02-23
 
-### Corrigé
+### Fixed
 
-- **Fix ESM imports** : `require('os')` remplacé par `import os`
-- **Service systemd** : utilise `/bin/sfha run` au lieu du chemin node interne
-- **VERSION hardcodée** : synchronisation cli.ts et daemon.ts
+- **Fix ESM imports**: `require('os')` replaced with `import os`
+- **Systemd service**: uses `/bin/sfha run` instead of internal node path
+- **Hardcoded VERSION**: synchronized cli.ts and daemon.ts
 
 ---
 
 ## [1.0.59] - 2026-02-23
 
-### Corrigé
+### Fixed
 
-- **Destroy cluster** : suppression correcte de cluster-state.json, interface wg-sfha et wg-sfha.conf
+- **Destroy cluster**: correct deletion of cluster-state.json, wg-sfha interface and wg-sfha.conf
 
 ---
 
 ## [1.0.58] - 2026-02-23
 
-### Changements majeurs
+### Major Changes
 
-- **Nouveau workflow de déploiement en 2 étapes** : plus stable pour les clusters multi-nœuds
-  - `sfha join` établit uniquement le tunnel WireGuard vers le leader
-  - `sfha propagate` (sur le leader) configure le full-mesh et démarre Corosync
+- **New 2-step deployment workflow**: more stable for multi-node clusters
+  - `sfha join` only establishes the WireGuard tunnel to the leader
+  - `sfha propagate` (on the leader) configures full-mesh and starts Corosync
 
-### Ajouté
+### Added
 
-- **Commande `sfha propagate`** : propagation explicite de la configuration à tous les nœuds
-  - Découvre automatiquement les peers via `wg show wg-sfha`
-  - Génère les configs WireGuard full-mesh
-  - Génère et distribue les configs Corosync
-  - Démarre les daemons sur tous les nœuds
+- **`sfha propagate` command**: explicit configuration propagation to all nodes
+  - Automatically discovers peers via `wg show wg-sfha`
+  - Generates full-mesh WireGuard configs
+  - Generates and distributes Corosync configs
+  - Starts daemons on all nodes
 
-- **Méthode `joinSimple()`** : join léger sans notification des peers
+- **`joinSimple()` method**: lightweight join without peer notification
 
-### Corrigé
+### Fixed
 
-- **Cascades de restart Corosync** : suppression du restart automatique dans `syncMeshPeersFromInitiator()`
-- **Sync périodique supprimé** : plus de sync automatique toutes les 30s qui causait des désynchronisations
-- **Stabilité multi-nœuds** : le cluster scale correctement à 4+ nœuds sans cascades
+- **Corosync restart cascades**: removed automatic restart in `syncMeshPeersFromInitiator()`
+- **Periodic sync removed**: no more automatic sync every 30s that caused desynchronization
+- **Multi-node stability**: cluster now scales correctly to 4+ nodes without cascades
 
-### Supprimé
+### Removed
 
-- Notification automatique des peers lors du join (remplacé par propagate explicite)
-- Sync périodique de la configuration (source de bugs)
+- Automatic peer notification during join (replaced by explicit propagate)
+- Periodic config sync (bug source)
 
 ---
 
 ## [1.0.3] - 2026-02-20
 
-### Ajouté
+### Added
 
-- **Health checks standalone** : section `health_checks:` au niveau racine de la config
-- **Setup STONITH interactif** : `sfha stonith setup [proxmox|webhook]`
-- **Flags STONITH dans init** : `sfha init --stonith proxmox --proxmox-url ...`
-- **Driver STONITH Webhook** : fencing via API HTTP externe
-- **Auto-détection VMID** : détection automatique pour LXC/QEMU Proxmox
+- **Standalone health checks**: `health_checks:` section at config root level
+- **Interactive STONITH setup**: `sfha stonith setup [proxmox|webhook]`
+- **STONITH flags in init**: `sfha init --stonith proxmox --proxmox-url ...`
+- **STONITH Webhook driver**: fencing via external HTTP API
+- **VMID auto-detection**: automatic detection for Proxmox LXC/QEMU
 
-### Format health checks standalone
+### Standalone health checks format
 ```yaml
 health_checks:
   - name: ssh
@@ -164,7 +164,7 @@ health_checks:
     timeout: 5
 ```
 
-### Format STONITH Webhook
+### STONITH Webhook format
 ```yaml
 stonith:
   provider: webhook
@@ -182,54 +182,54 @@ stonith:
 
 ## [1.0.2] - 2026-02-20
 
-### Modifié
+### Changed
 
-- **Failover optimisé** : ~6s au lieu de ~30s
+- **Optimized failover**: ~6s instead of ~30s
   - Grace period: 30s → 10s
-  - Polls requis: 3 → 2
-  - Intervalle polling: 5s → 2s
+  - Required polls: 3 → 2
+  - Polling interval: 5s → 2s
 
-### Corrigé
+### Fixed
 
-- Fix double affichage /24 dans `normalizeVip()`
-- Fix vérification VIP après `ip addr add`
+- Fix double /24 display in `normalizeVip()`
+- Fix VIP verification after `ip addr add`
 
 ---
 
 ## [1.0.1] - 2026-02-20
 
-### Corrigé
+### Fixed
 
-- **VIP cleanup** : suppression correcte de la VIP au shutdown
-- **Quorum check** : vérification avant activation des ressources
-- **Follower watchdog** : détection correcte de la perte du leader
-- **Service systemd LXC** : désactivation des restrictions namespace
+- **VIP cleanup**: correct VIP removal at shutdown
+- **Quorum check**: verification before resource activation
+- **Follower watchdog**: correct leader loss detection
+- **Systemd service LXC**: disabled namespace restrictions
 
 ---
 
 ## [1.0.0] - 2026-02-20
 
-### Ajouté
+### Added
 
-- **VIP flottante** avec failover automatique et gratuitous ARP
-- **Mesh WireGuard intégré** : commandes `init` et `join` pour créer un cluster en une commande
-- **STONITH Proxmox** : fencing automatique via API Proxmox (VMs et containers LXC)
-- **Détection de conflits IP** : vérification avant activation des VIPs
-- **Health checks** : HTTP, TCP et systemd avec hystérésis configurable
-- **CLI complète en français** avec option `--lang=en` pour l'anglais
-- **Contraintes** : colocation et ordre entre ressources
-- **Intégration Corosync** : quorum et membership via votequorum
-- **Service systemd** : démarrage automatique, reload via SIGHUP
-- **Socket Unix de contrôle** : communication CLI ↔ daemon
+- **Floating VIP** with automatic failover and gratuitous ARP
+- **Built-in WireGuard mesh**: `init` and `join` commands to create a cluster in one command
+- **Proxmox STONITH**: automatic fencing via Proxmox API (VMs and LXC containers)
+- **IP conflict detection**: verification before VIP activation
+- **Health checks**: HTTP, TCP and systemd with configurable hysteresis
+- **Full CLI in French** with `--lang=en` option for English
+- **Constraints**: colocation and order between resources
+- **Corosync integration**: quorum and membership via votequorum
+- **Systemd service**: automatic startup, reload via SIGHUP
+- **Unix control socket**: CLI ↔ daemon communication
 
-### Sécurité
+### Security
 
-- Quorum obligatoire pour activer les ressources
-- Protection anti-fencing storm (max 2 fencing / 5 min)
-- Délai de grâce configurable au démarrage (120s par défaut)
-- Token Proxmox stocké dans fichier séparé (600)
+- Required quorum to activate resources
+- Anti-fencing storm protection (max 2 fencing / 5 min)
+- Configurable startup grace period (120s by default)
+- Proxmox token stored in separate file (600)
 
-### Plateformes supportées
+### Supported Platforms
 
 - Debian 11 (Bullseye)
 - Debian 12 (Bookworm)
@@ -241,11 +241,11 @@ stonith:
 
 ## [Unreleased]
 
-### Prévu
+### Planned
 
-- Driver STONITH IPMI/iLO
-- Driver STONITH VMware vSphere
-- Driver STONITH AWS EC2
-- Interface web de monitoring
-- Métriques Prometheus
-- Support multi-VIP sur même interface
+- IPMI/iLO STONITH driver
+- VMware vSphere STONITH driver
+- AWS EC2 STONITH driver
+- Web monitoring interface
+- Prometheus metrics
+- Multi-VIP support on same interface

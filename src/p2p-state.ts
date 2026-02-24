@@ -566,21 +566,152 @@ ${servicesYaml || '  []'}
             
             logger.info(`P2P: Reload signal received, starting services...`);
             
-            // Démarrer/restart Corosync et sfha
+            // Démarrer/hot-reload Corosync et sfha
+            // IMPORTANT: On utilise corosync-cfgtool -R pour hot-reload, PAS restart
+            // restart corosync corrompt l'état du cluster et cause des split-brain
             try {
+              // Corosync: enable + start si pas running, sinon hot-reload
               execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
-              execSync('systemctl restart corosync 2>/dev/null || true', { stdio: 'pipe' });
+              const corosyncRunning = execSync('systemctl is-active corosync 2>/dev/null || echo inactive', { encoding: 'utf-8' }).trim();
+              if (corosyncRunning === 'active') {
+                // Hot-reload: recharge la config sans perdre l'état
+                execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+                logger.info(`P2P: Corosync hot-reloaded (cfgtool -R)`);
+              } else {
+                // Premier démarrage
+                execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
+                logger.info(`P2P: Corosync started`);
+              }
               execSync('sleep 2', { stdio: 'pipe' });
+              // sfha: enable + reload si running, sinon start
               execSync('systemctl enable sfha 2>/dev/null || true', { stdio: 'pipe' });
-              execSync('systemctl restart sfha 2>/dev/null || true', { stdio: 'pipe' });
-              logger.info(`P2P: Services restarted`);
+              const sfhaRunning = execSync('systemctl is-active sfha 2>/dev/null || echo inactive', { encoding: 'utf-8' }).trim();
+              if (sfhaRunning === 'active') {
+                execSync('sfha reload 2>/dev/null || true', { stdio: 'pipe' });
+                logger.info(`P2P: sfha reloaded`);
+              } else {
+                execSync('systemctl start sfha 2>/dev/null || true', { stdio: 'pipe' });
+                logger.info(`P2P: sfha started`);
+              }
             } catch (e: any) {
-              logger.warn(`P2P: Error restarting services: ${e.message}`);
+              logger.warn(`P2P: Error with services: ${e.message}`);
             }
             
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, message: 'Services restarted' }));
           } catch (err: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          }
+        });
+        return;
+      }
+      
+      // ===== POST /forward-vip-change =====
+      // Reçoit une demande de modification VIP d'un follower et la propage
+      // Appelé par les followers pour que le leader propage les changements
+      if (req.method === 'POST' && req.url === '/forward-vip-change') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body) as { 
+              authKey?: string;
+              action: 'add' | 'remove';
+              vip?: { name: string; ip: string; cidr: number; interface: string };
+              vipName?: string;
+            };
+            
+            const mesh = getMeshManager();
+            const meshConfig = mesh.getConfig();
+            
+            if (!meshConfig) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+              return;
+            }
+            
+            if (!data.authKey || data.authKey !== meshConfig.authKey) {
+              res.writeHead(404);
+              res.end('Not Found');
+              return;
+            }
+            
+            logger.info(`P2P: Received VIP ${data.action} request from follower`);
+            
+            // Apply the change to local config first
+            const configPath = '/etc/sfha/config.yml';
+            if (!existsSync(configPath)) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Config file not found' }));
+              return;
+            }
+            
+            const configContent = readFileSync(configPath, 'utf-8');
+            const config = yamlParse(configContent);
+            
+            if (!config.vips) {
+              config.vips = [];
+            }
+            
+            if (data.action === 'add' && data.vip) {
+              // Check if VIP already exists
+              const existing = config.vips.find((v: any) => v.name === data.vip!.name);
+              if (existing) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: `VIP "${data.vip.name}" already exists` }));
+                return;
+              }
+              config.vips.push(data.vip);
+              logger.info(`P2P: Added VIP ${data.vip.name} (${data.vip.ip}/${data.vip.cidr})`);
+            } else if (data.action === 'remove' && data.vipName) {
+              const index = config.vips.findIndex((v: any) => v.name === data.vipName);
+              if (index === -1) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: `VIP "${data.vipName}" not found` }));
+                return;
+              }
+              const removed = config.vips.splice(index, 1)[0];
+              logger.info(`P2P: Removed VIP ${data.vipName} (${removed.ip}/${removed.cidr})`);
+            } else {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Invalid action or missing parameters' }));
+              return;
+            }
+            
+            // Write config
+            writeFileSync(configPath, yamlStringify(config, { indent: 2 }));
+            
+            // Reload local sfha
+            try {
+              execSync('sfha reload', { stdio: 'pipe' });
+            } catch {
+              // Ignore reload errors
+            }
+            
+            // Propagate VIPs to all peers
+            const propagateResult = await propagateVipsToAllPeers();
+            
+            if (propagateResult.success) {
+              logger.info(`P2P: VIP change propagated to ${propagateResult.succeeded}/${propagateResult.total} peers`);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ 
+                success: true, 
+                message: `VIP ${data.action} applied and propagated to ${propagateResult.succeeded} peers` 
+              }));
+            } else {
+              logger.warn(`P2P: VIP propagation partially failed: ${propagateResult.failed}/${propagateResult.total} peers failed`);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ 
+                success: true, 
+                message: `VIP ${data.action} applied, but propagation had ${propagateResult.failed} failures`,
+                propagateResult 
+              }));
+            }
+          } catch (err: any) {
+            logger.error(`P2P: Error handling forward-vip-change: ${err.message}`);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, error: err.message }));
           }
@@ -1191,6 +1322,76 @@ export async function syncMeshPeersFromInitiator(): Promise<{ success: boolean; 
 let lastJoinReceived = 0;
 
 // ============================================
+// VIP-only Propagation (hot reload, no Corosync touch)
+// ============================================
+
+export interface VipPropagateResult {
+  success: boolean;
+  total: number;
+  succeeded: number;
+  failed: number;
+  error?: string;
+}
+
+/**
+ * Propage UNIQUEMENT les VIPs à tous les peers.
+ * Ne touche PAS à Corosync - utilisé pour les modifications de VIPs à chaud.
+ * 
+ * @param timeoutMs Timeout par nœud (défaut: 5s)
+ * @returns Résultat de la propagation
+ */
+export async function propagateVipsToAllPeers(timeoutMs: number = 5000): Promise<VipPropagateResult> {
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  
+  if (!meshConfig) {
+    return { success: false, total: 0, succeeded: 0, failed: 0, error: 'Aucun mesh configuré' };
+  }
+  
+  // Charger les VIPs depuis la config locale
+  const sfhaConfig = loadConfig('/etc/sfha/config.yml');
+  const vips = sfhaConfig.vips || [];
+  
+  logger.info(`Propagation des VIPs: ${vips.length} VIP(s) vers ${meshConfig.peers.length} peer(s)`);
+  
+  if (meshConfig.peers.length === 0) {
+    return { success: true, total: 0, succeeded: 0, failed: 0 };
+  }
+  
+  let succeeded = 0;
+  let failed = 0;
+  
+  for (const peer of meshConfig.peers) {
+    const peerMeshIp = peer.allowedIps?.split('/')[0];
+    if (!peerMeshIp) continue;
+    
+    logger.debug(`Sync VIPs vers ${peer.name} (${peerMeshIp})...`);
+    
+    const result = await httpPost(peerMeshIp, 7777, '/sync-vips', {
+      authKey: meshConfig.authKey,
+      vips: vips,
+    }, timeoutMs);
+    
+    if (result.success) {
+      logger.debug(`  ✓ ${peer.name} VIPs synchronized`);
+      succeeded++;
+    } else {
+      logger.warn(`  ✗ ${peer.name}: ${result.error}`);
+      failed++;
+    }
+  }
+  
+  const total = meshConfig.peers.length;
+  
+  return {
+    success: failed === 0,
+    total,
+    succeeded,
+    failed,
+  };
+}
+
+// ============================================
 // Propagation manuelle (sfha propagate)
 // ============================================
 
@@ -1378,9 +1579,18 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Prom
   if (failed === 0 && succeeded > 0) {
     logger.info(`Tous les nœuds configurés. Envoi du signal de reload...`);
     
-    // D'abord restart Corosync localement (le leader)
+    // D'abord hot-reload ou start Corosync localement (le leader)
+    // IMPORTANT: On utilise corosync-cfgtool -R pour hot-reload, PAS restart
     try {
-      execSync('systemctl restart corosync 2>/dev/null || true', { stdio: 'pipe' });
+      const corosyncRunning = execSync('systemctl is-active corosync 2>/dev/null || echo inactive', { encoding: 'utf-8' }).trim();
+      if (corosyncRunning === 'active') {
+        execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+        logger.info(`Corosync local: hot-reload (cfgtool -R)`);
+      } else {
+        execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
+        execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
+        logger.info(`Corosync local: started`);
+      }
     } catch {}
     
     // Puis envoyer /reload-services à tous les peers
@@ -1404,6 +1614,122 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Prom
     failed,
     errors: errors.length > 0 ? errors : undefined,
   };
+}
+
+// ============================================
+// Forward VIP Change to Leader
+// ============================================
+
+export interface ForwardVipChangeRequest {
+  action: 'add' | 'remove';
+  vip?: { name: string; ip: string; cidr: number; interface: string };
+  vipName?: string;
+}
+
+/**
+ * Find the leader's mesh IP.
+ * Uses cluster-state.json first, then falls back to election.
+ */
+export function findLeaderMeshIp(): string | null {
+  // Method 1: Check cluster-state.json (created by sfha init on leader)
+  try {
+    const stateFile = '/etc/sfha/cluster-state.json';
+    if (existsSync(stateFile)) {
+      const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+      if (state.leaderIp) {
+        return state.leaderIp;
+      }
+    }
+  } catch {}
+  
+  // Method 2: Check mesh config for initiator peer (leader is usually the initiator)
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  if (meshConfig?.peers) {
+    const initiator = meshConfig.peers.find(p => p.name === 'initiator');
+    if (initiator?.allowedIps) {
+      return initiator.allowedIps.split('/')[0];
+    }
+    // Fallback: first peer is likely the leader
+    if (meshConfig.peers.length > 0 && meshConfig.peers[0].allowedIps) {
+      return meshConfig.peers[0].allowedIps.split('/')[0];
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Check if this node is the leader.
+ * Returns true if we are the leader, false otherwise.
+ */
+export function isLocalNodeLeader(): boolean {
+  // Method 1: Check if daemon reports we are leader via socket
+  try {
+    const socketPath = '/run/sfha.sock';
+    if (existsSync(socketPath)) {
+      // Can't do sync socket call easily, skip this method
+    }
+  } catch {}
+  
+  // Method 2: Check cluster-state.json - if we created it, we're likely the leader
+  try {
+    const stateFile = '/etc/sfha/cluster-state.json';
+    if (existsSync(stateFile)) {
+      const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+      const meshConfig = getMeshManager().getConfig();
+      if (meshConfig?.meshIp && state.leaderIp) {
+        const localMeshIp = meshConfig.meshIp.split('/')[0];
+        return localMeshIp === state.leaderIp;
+      }
+    }
+  } catch {}
+  
+  // Method 3: Check if we have peers - if we have no initiator peer, we might be the leader
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  if (meshConfig?.peers) {
+    const hasInitiator = meshConfig.peers.some(p => p.name === 'initiator');
+    // If we don't have an "initiator" peer, we ARE the initiator (leader)
+    return !hasInitiator;
+  }
+  
+  // Default: assume we're not the leader (safer)
+  return false;
+}
+
+/**
+ * Forward a VIP change request to the leader node.
+ * The leader will apply the change and propagate to all nodes.
+ * 
+ * @param request The VIP change request (add or remove)
+ * @param timeoutMs Timeout in ms (default: 10s)
+ * @returns Result of the operation
+ */
+export async function forwardVipChangeToLeader(
+  request: ForwardVipChangeRequest,
+  timeoutMs: number = 10000
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  
+  if (!meshConfig) {
+    return { success: false, error: 'No mesh configured' };
+  }
+  
+  const leaderIp = findLeaderMeshIp();
+  if (!leaderIp) {
+    return { success: false, error: 'Could not find leader mesh IP' };
+  }
+  
+  logger.info(`Forwarding VIP ${request.action} to leader at ${leaderIp}...`);
+  
+  const payload = {
+    authKey: meshConfig.authKey,
+    ...request,
+  };
+  
+  return httpPost(leaderIp, 7777, '/forward-vip-change', payload, timeoutMs);
 }
 
 // ============================================
