@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.71] - 2026-02-24
+
+### Fixed
+
+- **Fix VIPs zombies**: les VIPs supprimées restaient sur l'interface réseau
+  - Nouvelle fonction `syncVips()` qui nettoie les IPs secondaires non présentes dans la config
+  - `vip remove` appelle maintenant `removeVip()` pour supprimer l'IP de l'interface
+  - `reload` utilise `syncVips()` au lieu de `activateAllVips()` pour nettoyer automatiquement
+
+### Added
+
+- **getSecondaryIpsOnInterface()**: liste les IPs secondaires présentes sur une interface
+
+---
+
 ## [1.0.70] - 2026-02-24
 
 ### Added
