@@ -1,6 +1,6 @@
 {
   "name": "sfha",
-  "version": "1.0.71",
+  "version": "1.0.72",
   "description": "Haute Disponibilité légère pour Linux - Lightweight High Availability",
   "type": "module",
   "private": true,

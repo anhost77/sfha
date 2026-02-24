@@ -9,13 +9,13 @@ import { SfhaDaemon } from './daemon.js';
 import { loadConfig, getExampleConfig } from './config.js';
 import { getCorosyncState, getClusterNodes } from './corosync.js';
 import { electLeader } from './election.js';
-import { getVipsState } from './vip.js';
+import { getVipsState, removeVip } from './vip.js';
 import { sendCommand, isDaemonRunning } from './control.js';
 import { initI18n, t } from './i18n.js';
 import { getMeshManager, isWireGuardInstalled } from './mesh/index.js';
 import { isServiceActive } from './resources.js';
 import { logger } from './utils/logger.js';
-import { propagateConfigToAllPeers, propagateVipsToAllPeers, isLocalNodeLeader, forwardVipChangeToLeader } from './p2p-state.js';
+import { propagateConfigToAllPeers, propagateVipsToAllPeers, isLocalNodeLeader, forwardVipChangeToLeader, checkPeerHealth } from './p2p-state.js';
 import { initClusterState, getClusterState, startPropagation, completePropagation, addPeerToState } from './cluster-state.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -155,8 +155,28 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
         // Get phase from cluster-state.json (source of truth)
         const clusterState = getClusterState();
         
+        // Enrich nodes with sfhaRunning status (P2P ping check)
+        // This detects if sfha daemon is running on each node
+        const nodes = response.data?.nodes || [];
+        const enrichedNodes = await Promise.all(
+          nodes.map(async (node: any) => {
+            // Local node is always running sfha (we are responding!)
+            if (node.isLocal) {
+              return { ...node, sfhaRunning: true };
+            }
+            // Offline nodes in Corosync can't have sfha running
+            if (!node.online) {
+              return { ...node, sfhaRunning: false };
+            }
+            // For online remote nodes, ping sfha P2P server
+            const sfhaRunning = await checkPeerHealth(node.ip, 2000);
+            return { ...node, sfhaRunning };
+          })
+        );
+        
         const enrichedData = {
           ...response.data,
+          nodes: enrichedNodes,
           phase: clusterState?.phase || null,
           pendingPeers: clusterState?.peers?.length || 0,
           // Info cluster-state pour le dashboard
@@ -172,7 +192,22 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
       }
       
       if (response.success && response.data) {
-        displayDaemonStatus(response.data);
+        // Enrich nodes with sfhaRunning for display
+        const nodes = response.data?.nodes || [];
+        const enrichedNodes = await Promise.all(
+          nodes.map(async (node: any) => {
+            if (node.isLocal) {
+              return { ...node, sfhaRunning: true };
+            }
+            if (!node.online) {
+              return { ...node, sfhaRunning: false };
+            }
+            const sfhaRunning = await checkPeerHealth(node.ip, 2000);
+            return { ...node, sfhaRunning };
+          })
+        );
+        
+        displayDaemonStatus({ ...response.data, nodes: enrichedNodes });
         return;
       }
     }
@@ -189,6 +224,25 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
     const pendingPeers = clusterState?.peers?.length || 0;
     
     if (options.json) {
+      // Enrich nodes with sfhaRunning status (P2P ping check)
+      // Since daemon is not running locally, we mark local node as sfhaRunning: false
+      const localNodeName = config.node.name;
+      const enrichedNodes = await Promise.all(
+        corosync.nodes.map(async (node) => {
+          // Local node: sfhaRunning is false because we're in "daemon not running" branch
+          if (node.name === localNodeName) {
+            return { ...node, sfhaRunning: false };
+          }
+          // Offline nodes can't have sfha running
+          if (!node.online) {
+            return { ...node, sfhaRunning: false };
+          }
+          // For online remote nodes, ping sfha P2P server
+          const sfhaRunning = await checkPeerHealth(node.ip, 2000);
+          return { ...node, sfhaRunning };
+        })
+      );
+      
       console.log(JSON.stringify({
         cluster: config.cluster.name,
         node: config.node.name,
@@ -196,7 +250,7 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
         corosync: {
           running: corosync.running,
           quorate: corosync.quorum.quorate,
-          nodes: corosync.nodes,
+          nodes: enrichedNodes,
         },
         leader: election?.leaderName,
         isLeader: election?.isLocalLeader,
@@ -236,12 +290,34 @@ async function statusCommand(options: { json?: boolean; config?: string; lang?: 
       `${t('status.quorum')}: ${quorumStatus} (${corosync.nodes.filter(n => n.online).length}/${corosync.nodes.length} ${t('status.nodes')})`,
     ], 44));
     
-    // Nœuds
+    // Nœuds - enrichir avec sfhaRunning status
+    const localNodeName = config.node.name;
+    const nodeHealthChecks = await Promise.all(
+      corosync.nodes.map(async (node) => {
+        // Local node: sfhaRunning is false because daemon is not running
+        if (node.name === localNodeName) {
+          return { node, sfhaRunning: false };
+        }
+        // Offline nodes can't have sfha running
+        if (!node.online) {
+          return { node, sfhaRunning: false };
+        }
+        // For online remote nodes, ping sfha P2P server
+        const sfhaRunning = await checkPeerHealth(node.ip, 2000);
+        return { node, sfhaRunning };
+      })
+    );
+    
     console.log('\n' + colorize('Nœuds:', 'blue'));
-    for (const node of corosync.nodes) {
-      const status = node.online ? 
-        colorize('●', 'green') + ' ' + t('status.online') : 
-        colorize('○', 'red') + ' ' + t('status.offline');
+    for (const { node, sfhaRunning } of nodeHealthChecks) {
+      let status: string;
+      if (!node.online) {
+        status = colorize('○', 'red') + ' ' + t('status.offline');
+      } else if (!sfhaRunning) {
+        status = colorize('◐', 'yellow') + ' sfha down';
+      } else {
+        status = colorize('●', 'green') + ' ' + t('status.online');
+      }
       const leader = election?.leaderName === node.name ? colorize(' (leader)', 'yellow') : '';
       console.log(`  ${status} ${node.name} (${node.ip})${leader}`);
     }
@@ -298,6 +374,24 @@ function displayDaemonStatus(data: any): void {
     `${t('status.quorum')}: ${quorumStatus} (${data.corosync.nodesOnline}/${data.corosync.nodesTotal} ${t('status.nodes')})`,
     `Leader: ${data.leaderName || 'aucun'}`,
   ], 44));
+  
+  // Nœuds
+  if (data.nodes && data.nodes.length > 0) {
+    console.log('\n' + colorize('Nœuds:', 'blue'));
+    for (const node of data.nodes) {
+      let status: string;
+      if (!node.online) {
+        status = colorize('○', 'red') + ' ' + t('status.offline');
+      } else if (node.sfhaRunning === false) {
+        status = colorize('◐', 'yellow') + ' sfha down';
+      } else {
+        status = colorize('●', 'green') + ' ' + t('status.online');
+      }
+      const leader = node.isLeader ? colorize(' (leader)', 'yellow') : '';
+      const local = node.isLocal ? colorize(' *', 'cyan') : '';
+      console.log(`  ${status} ${node.name} (${node.ip})${leader}${local}`);
+    }
+  }
   
   // VIPs
   if (data.vips && data.vips.length > 0) {
@@ -1580,7 +1674,6 @@ async function vipRemoveCommand(
     console.log(colorize('✓', 'green'), `VIP "${name}" supprimée de la config (${removed.ip}/${removed.cidr})`);
     
     // Remove VIP from network interface
-    const { removeVip } = await import('./vip.js');
     const vipConfig = { name: removed.name, ip: removed.ip, cidr: removed.cidr, interface: removed.interface || 'eth0' };
     if (removeVip(vipConfig, (msg) => console.log(colorize('ℹ', 'gray'), msg))) {
       console.log(colorize('✓', 'green'), `VIP ${removed.ip} supprimée de l'interface`);

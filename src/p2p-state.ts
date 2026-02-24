@@ -195,6 +195,14 @@ export class P2PStateManager {
         return;
       }
       
+      // Simple ping endpoint - NO AUTH required (used for sfha daemon health detection)
+      // Returns { ok: true } if sfha daemon is running and responding
+      if (req.method === 'GET' && req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      
       // Add peer endpoint - called by joining nodes to register themselves
       // SECURITY: Requires valid cluster authKey in request
       if (req.method === 'POST' && req.url === '/add-peer') {
@@ -766,17 +774,23 @@ ${servicesYaml || '  []'}
             
             // Write back
             writeFileSync(configPath, yamlStringify(config, { indent: 2 }));
-            logger.info(`P2P: VIPs synced, reloading sfha...`);
+            logger.info(`P2P: VIPs synced, scheduling reload...`);
             
-            // Reload sfha
-            try {
-              execSync('sfha reload', { stdio: 'pipe' });
-            } catch {
-              // Ignore reload errors
-            }
-            
+            // Send response FIRST, then reload asynchronously
+            // This avoids blocking the socket during reload
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, message: `Synced ${data.vips.length} VIPs` }));
+            
+            // Reload sfha after response is sent (async)
+            // Use systemctl to send SIGHUP which triggers reload
+            setTimeout(() => {
+              try {
+                execSync('systemctl kill -s SIGHUP sfha', { stdio: 'pipe', timeout: 5000 });
+                logger.info(`P2P: sfha reloaded via SIGHUP after VIP sync`);
+              } catch (reloadErr: any) {
+                logger.warn(`P2P: sfha reload failed: ${reloadErr.message}`);
+              }
+            }, 100);
           } catch (err: any) {
             logger.error(`P2P: Error syncing VIPs: ${err.message}`);
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1730,6 +1744,85 @@ export async function forwardVipChangeToLeader(
   };
   
   return httpPost(leaderIp, 7777, '/forward-vip-change', payload, timeoutMs);
+}
+
+// ============================================
+// Peer Health Check (sfha daemon running detection)
+// ============================================
+
+/**
+ * Check if the sfha daemon is running on a remote node
+ * by pinging its P2P HTTP server.
+ * 
+ * @param meshIp The mesh IP address of the peer
+ * @param timeoutMs Timeout in milliseconds (default: 2s)
+ * @returns true if sfha daemon is responding, false otherwise
+ */
+export function checkPeerHealth(meshIp: string, timeoutMs: number = 2000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const url = `http://${meshIp}:7777/ping`;
+    
+    const timeout = setTimeout(() => {
+      resolve(false);
+    }, timeoutMs);
+    
+    const req = http.get(url, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        clearTimeout(timeout);
+        try {
+          const response = JSON.parse(data);
+          resolve(response.ok === true);
+        } catch {
+          resolve(false);
+        }
+      });
+    });
+    
+    req.on('error', () => {
+      clearTimeout(timeout);
+      resolve(false);
+    });
+    
+    req.on('timeout', () => {
+      req.destroy();
+      clearTimeout(timeout);
+      resolve(false);
+    });
+  });
+}
+
+/**
+ * Check health of all peers in the mesh
+ * Returns a map of meshIp -> sfhaRunning
+ * 
+ * @param timeoutMs Timeout per peer in ms (default: 2s)
+ * @returns Map of peer mesh IP to health status
+ */
+export async function checkAllPeersHealth(timeoutMs: number = 2000): Promise<Map<string, boolean>> {
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  const results = new Map<string, boolean>();
+  
+  if (!meshConfig) {
+    return results;
+  }
+  
+  const checks = meshConfig.peers.map(async (peer) => {
+    const meshIp = peer.allowedIps?.split('/')[0];
+    if (meshIp) {
+      const healthy = await checkPeerHealth(meshIp, timeoutMs);
+      results.set(meshIp, healthy);
+    }
+  });
+  
+  await Promise.all(checks);
+  return results;
 }
 
 // ============================================

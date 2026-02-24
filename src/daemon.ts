@@ -16,7 +16,7 @@ import { t, initI18n } from './i18n.js';
 import { logger, setLogLevel, createSimpleLogger } from './utils/logger.js';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { getMeshManager } from './mesh/index.js';
-import { P2PStateManager, initP2PStateManager, syncMeshPeersFromInitiator, propagateVipsToAllPeers } from './p2p-state.js';
+import { P2PStateManager, initP2PStateManager, syncMeshPeersFromInitiator, propagateVipsToAllPeers, checkAllPeersHealth } from './p2p-state.js';
 import { startKnockServer, stopKnockServer, authorizePermanently } from './knock.js';
 
 // ============================================
@@ -110,6 +110,7 @@ export class SfhaDaemon extends EventEmitter {
   private pollsWithoutVip: number = 0;
   private pollsAsSecondary: number = 0;
   private startupGracePeriod: boolean = true;
+  private previousOnlineNodes: Set<string> = new Set();
 
   constructor(options: DaemonOptions = {}) {
     super();
@@ -826,7 +827,67 @@ export class SfhaDaemon extends EventEmitter {
       this.checkDeadNodesForFencing(state);
     }
     
+    // Détecter les nœuds qui reviennent online (sfha running) et propager les VIPs
+    if (this.isLeader && state.quorum.quorate) {
+      this.checkNodesRejoining().catch(err => {
+        logger.warn(`Erreur checkNodesRejoining: ${err.message}`);
+      });
+    }
+    
     this.emit('poll', state);
+  }
+  
+  /**
+   * Détecte les nœuds qui reviennent online (sfha daemon running) et propage les VIPs
+   * Utilise le ping P2P (sfhaRunning) au lieu de Corosync (qui reste actif même si sfha est arrêté)
+   */
+  private async checkNodesRejoining(): Promise<void> {
+    if (!this.config || this.config.vips.length === 0) return;
+    
+    // Vérifier la santé de tous les peers via P2P ping
+    const healthMap = await checkAllPeersHealth(3000);
+    
+    // Trouver notre IP mesh
+    const mesh = getMeshManager();
+    const meshConfig = mesh?.getConfig();
+    const myIp = meshConfig?.meshIp?.split('/')[0] || '';
+    
+    // Construire le set des IPs où sfha est running
+    const currentRunning = new Set<string>();
+    for (const [ip, running] of healthMap) {
+      if (running) {
+        currentRunning.add(ip);
+      }
+    }
+    
+    // Trouver les nœuds qui viennent de revenir (pas dans previous, mais dans current)
+    const rejoiningIps: string[] = [];
+    for (const ip of currentRunning) {
+      if (!this.previousOnlineNodes.has(ip) && ip !== myIp) {
+        rejoiningIps.push(ip);
+      }
+    }
+    
+    // Mettre à jour l'état précédent
+    this.previousOnlineNodes = currentRunning;
+    
+    // Si des nœuds reviennent
+    if (rejoiningIps.length > 0) {
+      logger.info(`🔄 Nœuds sfha de retour (IPs): ${rejoiningIps.join(', ')} - propagation des VIPs...`);
+      
+      // Propager les VIPs avec un petit délai pour laisser le nœud se stabiliser
+      setTimeout(() => {
+        propagateVipsToAllPeers(10000).then(result => {
+          if (result.success) {
+            logger.info(`✅ VIPs propagées aux nœuds de retour: ${result.succeeded}/${result.total}`);
+          } else {
+            logger.warn(`⚠️ Propagation partielle: ${result.succeeded}/${result.total}`);
+          }
+        }).catch(err => {
+          logger.warn(`❌ Propagation échouée: ${err.message}`);
+        });
+      }, 2000); // 2s de délai
+    }
   }
   
   /**
