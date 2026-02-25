@@ -66,6 +66,99 @@ const DEFAULT_POLL_INTERVAL = 5000;
 const REQUEST_TIMEOUT = 2000;
 
 // ============================================
+// Corosync State Management (fichier d'état)
+// ============================================
+
+const COROSYNC_STATE_FILE = '/etc/sfha/corosync-state.json';
+
+type CorosyncState = 'initializing' | 'running' | 'node_changed';
+
+/**
+ * Lit l'état Corosync depuis le fichier d'état
+ */
+function getCorosyncState(): CorosyncState {
+  try {
+    if (existsSync(COROSYNC_STATE_FILE)) {
+      const data = JSON.parse(readFileSync(COROSYNC_STATE_FILE, 'utf-8'));
+      return data.state || 'initializing';
+    }
+  } catch {}
+  return 'initializing'; // Par défaut, on considère qu'on initialise
+}
+
+/**
+ * Écrit l'état Corosync dans le fichier d'état
+ */
+function setCorosyncState(state: CorosyncState): void {
+  try {
+    const data = { state, updatedAt: new Date().toISOString() };
+    writeFileSync(COROSYNC_STATE_FILE, JSON.stringify(data, null, 2));
+    logger.info(`Corosync state: ${state}`);
+  } catch (err: any) {
+    logger.warn(`Failed to write corosync state: ${err.message}`);
+  }
+}
+
+/**
+ * Marque qu'un nœud a été ajouté/supprimé → restart nécessaire
+ */
+export function markNodelistChanged(): void {
+  setCorosyncState('node_changed');
+}
+
+/**
+ * Détermine si Corosync nécessite un restart basé sur le fichier d'état
+ * - initializing : première propagation → restart
+ * - node_changed : nœud ajouté/supprimé → restart  
+ * - running : cluster stable → hot-reload suffit
+ */
+function needsCorosyncRestart(): boolean {
+  const state = getCorosyncState();
+  
+  if (state === 'initializing') {
+    logger.info('Corosync: état "initializing" → restart nécessaire');
+    return true;
+  }
+  
+  if (state === 'node_changed') {
+    logger.info('Corosync: état "node_changed" → restart nécessaire');
+    return true;
+  }
+  
+  logger.info('Corosync: état "running" → hot-reload suffit');
+  return false;
+}
+
+/**
+ * Applique la config Corosync: restart si état l'exige, sinon hot-reload
+ */
+function applyCorosyncConfig(): void {
+  const needRestart = needsCorosyncRestart();
+  
+  execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
+  
+  if (needRestart) {
+    // Restart complet nécessaire
+    logger.info('Corosync: restart complet...');
+    execSync('systemctl restart corosync 2>/dev/null || true', { stdio: 'pipe' });
+    logger.info('Corosync: restarted');
+    // Marquer le cluster comme running après restart réussi
+    setCorosyncState('running');
+  } else {
+    // Hot-reload suffit
+    const corosyncRunning = execSync('systemctl is-active corosync 2>/dev/null || echo inactive', { encoding: 'utf-8' }).trim();
+    if (corosyncRunning === 'active') {
+      execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+      logger.info('Corosync: hot-reload (cfgtool -R)');
+    } else {
+      execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
+      logger.info('Corosync: started');
+      setCorosyncState('running');
+    }
+  }
+}
+
+// ============================================
 // P2P State Manager
 // ============================================
 
@@ -596,22 +689,11 @@ ${servicesYaml || '  []'}
             
             logger.info(`P2P: Reload signal received, starting services...`);
             
-            // Démarrer/hot-reload Corosync et sfha
-            // IMPORTANT: On utilise corosync-cfgtool -R pour hot-reload, PAS restart
-            // restart corosync corrompt l'état du cluster et cause des split-brain
+            // Démarrer/hot-reload Corosync selon l'état du cluster
             try {
-              // Corosync: enable + start si pas running, sinon hot-reload
-              execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
-              const corosyncRunning = execSync('systemctl is-active corosync 2>/dev/null || echo inactive', { encoding: 'utf-8' }).trim();
-              if (corosyncRunning === 'active') {
-                // Hot-reload: recharge la config sans perdre l'état
-                execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
-                logger.info(`P2P: Corosync hot-reloaded (cfgtool -R)`);
-              } else {
-                // Premier démarrage
-                execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
-                logger.info(`P2P: Corosync started`);
-              }
+              // Appliquer la config (restart si état l'exige, sinon hot-reload)
+              applyCorosyncConfig();
+              
               execSync('sleep 2', { stdio: 'pipe' });
               // sfha: enable + reload si running, sinon start
               execSync('systemctl enable sfha 2>/dev/null || true', { stdio: 'pipe' });
@@ -1757,13 +1839,22 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Prom
     nodeId: n.nodeId,
   }));
   
+  // Vérifier si restart nécessaire AVANT d'écrire la config (basé sur fichier d'état)
+  const needRestart = needsCorosyncRestart();
+  
   // Mettre à jour la config Corosync locale
   updateCorosyncForMesh(meshConfig.clusterName, corosyncNodes, meshConfig.corosyncPort || 5405);
   
-  // Démarrer Corosync localement si pas déjà fait
+  // Démarrer/restart Corosync localement selon le besoin
   try {
     execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
-    execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
+    if (needRestart) {
+      logger.info('Corosync local: restart (état initializing/node_changed)');
+      execSync('systemctl restart corosync 2>/dev/null || true', { stdio: 'pipe' });
+      setCorosyncState('running');
+    } else {
+      execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
+    }
   } catch {}
   
   const errors: Array<{ node: string; error: string }> = [];
@@ -1827,21 +1918,9 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Prom
   if (failed === 0 && succeeded > 0) {
     logger.info(`Tous les nœuds configurés. Envoi du signal de reload...`);
     
-    // D'abord hot-reload ou start Corosync localement (le leader)
-    // IMPORTANT: On utilise corosync-cfgtool -R pour hot-reload, PAS restart
-    try {
-      const corosyncRunning = execSync('systemctl is-active corosync 2>/dev/null || echo inactive', { encoding: 'utf-8' }).trim();
-      if (corosyncRunning === 'active') {
-        execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
-        logger.info(`Corosync local: hot-reload (cfgtool -R)`);
-      } else {
-        execSync('systemctl enable corosync 2>/dev/null || true', { stdio: 'pipe' });
-        execSync('systemctl start corosync 2>/dev/null || true', { stdio: 'pipe' });
-        logger.info(`Corosync local: started`);
-      }
-    } catch {}
+    // Note: Corosync local a déjà été restart/start plus haut avant la propagation
     
-    // Puis envoyer /reload-services à tous les peers
+    // Envoyer /reload-services à tous les peers
     for (const peer of discoveredPeers) {
       const peerMeshIp = peer.allowedIps.split('/')[0];
       try {

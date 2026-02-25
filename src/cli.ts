@@ -31,10 +31,30 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.76';
-
 function getVersion(): string {
-  return VERSION;
+  try {
+    // Chercher package.json dans plusieurs emplacements possibles
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    
+    // Essayer ../package.json (dev) puis ./package.json (installé)
+    const paths = [
+      join(__dirname, '..', 'package.json'),
+      join(__dirname, 'package.json'),
+      '/usr/lib/sfha/package.json',
+    ];
+    
+    for (const pkgPath of paths) {
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+        if (pkg.version) {
+          return pkg.version;
+        }
+      }
+    }
+  } catch {}
+  
+  return '1.0.72'; // Fallback
 }
 
 // ============================================

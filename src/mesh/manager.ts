@@ -53,7 +53,7 @@ import {
   detectPublicEndpoint,
 } from './wireguard.js';
 import { updateCorosyncForMesh, addNodeToCorosync, removeNodeFromCorosync, reloadCorosync, getNextNodeId, getCorosyncNodes } from './corosync-mesh.js';
-import { fetchCorosyncNodesFromPeer } from '../p2p-state.js';
+import { fetchCorosyncNodesFromPeer, markNodelistChanged } from '../p2p-state.js';
 
 const MESH_CONFIG_PATH = '/etc/sfha/mesh.json';
 const WG_KEYS_DIR = '/etc/sfha/wireguard';
@@ -1070,10 +1070,14 @@ services: []
     );
     saveWgQuickConfig(WG_INTERFACE, wgConfig);
 
-    // Supprimer de Corosync
+    // Marquer que la nodelist a changé (pour forcer restart au lieu de hot-reload)
+    markNodelistChanged();
+    
+    // Supprimer de Corosync et restart (pas hot-reload car nodelist changée)
     try {
       removeNodeFromCorosync(name);
-      reloadCorosync();
+      // Restart corosync pour appliquer la nouvelle nodelist
+      execSync('systemctl restart corosync 2>/dev/null || true', { stdio: 'pipe' });
     } catch {
       // Corosync pas configuré ou nœud pas trouvé - ignorer
     }

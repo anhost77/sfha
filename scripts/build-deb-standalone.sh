@@ -147,8 +147,8 @@ fi
 cat > "${BUILD_DIR}/lib/systemd/system/sfha.service" << 'SERVICE'
 [Unit]
 Description=sfha - Système de Haute Disponibilité léger
-After=network.target corosync.service
-Requires=corosync.service
+After=network.target
+Wants=corosync.service
 Documentation=https://github.com/serverflow/sfha
 
 [Service]
