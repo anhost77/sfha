@@ -822,6 +822,159 @@ ${servicesYaml || '  []'}
         return;
       }
       
+      // ===== POST /leave =====
+      // Reçoit un ordre de quitter le cluster (envoyé par un autre node)
+      // Ce node va se cleaner et quitter
+      if (req.method === 'POST' && req.url === '/leave') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body) as { authKey?: string };
+            
+            const mesh = getMeshManager();
+            const meshConfig = mesh.getConfig();
+            
+            if (!meshConfig) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+              return;
+            }
+            
+            if (!data.authKey || data.authKey !== meshConfig.authKey) {
+              res.writeHead(404);
+              res.end('Not Found');
+              return;
+            }
+            
+            logger.info(`P2P: Received leave order - cleaning up and exiting cluster`);
+            
+            // Respond first, then cleanup
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Leave order received, cleaning up...' }));
+            
+            // Cleanup asynchronously after response is sent
+            setTimeout(async () => {
+              try {
+                // 1. Stop sfha daemon
+                logger.info(`P2P: Stopping sfha daemon...`);
+                execSync('systemctl stop sfha 2>/dev/null || true', { stdio: 'pipe' });
+                execSync('systemctl disable sfha 2>/dev/null || true', { stdio: 'pipe' });
+                
+                // 2. Stop Corosync
+                logger.info(`P2P: Stopping Corosync...`);
+                execSync('systemctl stop corosync 2>/dev/null || true', { stdio: 'pipe' });
+                execSync('systemctl disable corosync 2>/dev/null || true', { stdio: 'pipe' });
+                
+                // 3. Stop WireGuard
+                logger.info(`P2P: Stopping WireGuard...`);
+                execSync('wg-quick down wg-sfha 2>/dev/null || true', { stdio: 'pipe' });
+                execSync('systemctl disable wg-quick@wg-sfha 2>/dev/null || true', { stdio: 'pipe' });
+                
+                // 4. Backup and remove config files
+                const now = Date.now();
+                const files = [
+                  '/etc/sfha/config.yml',
+                  '/etc/sfha/mesh.json',
+                  '/etc/sfha/cluster-state.json',
+                  '/etc/corosync/corosync.conf',
+                  '/etc/wireguard/wg-sfha.conf',
+                ];
+                
+                for (const file of files) {
+                  try {
+                    if (existsSync(file)) {
+                      execSync(`mv "${file}" "${file}.bak.leave.${now}"`, { stdio: 'pipe' });
+                    }
+                  } catch {}
+                }
+                
+                logger.info(`P2P: Leave cleanup complete`);
+              } catch (cleanupErr: any) {
+                logger.error(`P2P: Leave cleanup error: ${cleanupErr.message}`);
+              }
+            }, 500);
+            
+          } catch (err: any) {
+            logger.error(`P2P: Error handling leave: ${err.message}`);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          }
+        });
+        return;
+      }
+      
+      // ===== POST /remove-peer =====
+      // Reçoit un ordre de supprimer un peer de ce node
+      // Propagé par le node qui exécute "sfha node remove <hostname>"
+      if (req.method === 'POST' && req.url === '/remove-peer') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body) as { 
+              authKey?: string;
+              peerName: string;
+              peerMeshIp: string;
+            };
+            
+            const mesh = getMeshManager();
+            const meshConfig = mesh.getConfig();
+            
+            if (!meshConfig) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+              return;
+            }
+            
+            if (!data.authKey || data.authKey !== meshConfig.authKey) {
+              res.writeHead(404);
+              res.end('Not Found');
+              return;
+            }
+            
+            if (!data.peerName || !data.peerMeshIp) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Missing peerName or peerMeshIp' }));
+              return;
+            }
+            
+            logger.info(`P2P: Removing peer ${data.peerName} (${data.peerMeshIp})...`);
+            
+            // 1. Remove from WireGuard config
+            const removeResult = mesh.removePeerByName(data.peerName);
+            if (!removeResult.success) {
+              logger.warn(`P2P: WireGuard remove failed: ${removeResult.error}`);
+            }
+            
+            // 2. Remove from Corosync
+            try {
+              const { removeNodeFromCorosync } = await import('./mesh/corosync-mesh.js');
+              removeNodeFromCorosync(data.peerName);
+              // Hot-reload Corosync
+              execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+            } catch (corosyncErr: any) {
+              logger.warn(`P2P: Corosync remove failed: ${corosyncErr.message}`);
+            }
+            
+            logger.info(`P2P: Peer ${data.peerName} removed`);
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: `Peer ${data.peerName} removed` }));
+            
+          } catch (err: any) {
+            logger.error(`P2P: Error handling remove-peer: ${err.message}`);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          }
+        });
+        return;
+      }
+      
       res.writeHead(404);
       res.end('Not Found');
     });
@@ -1904,6 +2057,91 @@ export async function checkAllPeersHealth(timeoutMs: number = 2000): Promise<Map
   
   await Promise.all(checks);
   return results;
+}
+
+// ============================================
+// Leave / Remove Peer Functions
+// ============================================
+
+/**
+ * Send leave order to a peer node
+ * The peer will clean itself up and exit the cluster
+ * 
+ * @param peerMeshIp The mesh IP of the peer to send the leave order to
+ * @param authKey Cluster auth key for authentication
+ * @param timeoutMs Timeout in ms (default: 10s)
+ * @returns Result of the operation
+ */
+export async function sendLeaveOrderToPeer(
+  peerMeshIp: string,
+  authKey: string,
+  timeoutMs: number = 10000
+): Promise<{ success: boolean; error?: string }> {
+  return httpPost(peerMeshIp, 7777, '/leave', { authKey }, timeoutMs);
+}
+
+/**
+ * Send remove-peer order to all nodes in the cluster
+ * Used to propagate peer removal after a node leaves
+ * 
+ * @param peerName The name of the peer to remove
+ * @param peerMeshIp The mesh IP of the peer being removed (to skip it)
+ * @param authKey Cluster auth key for authentication
+ * @param timeoutMs Timeout per node in ms (default: 5s)
+ * @returns Result with count of successful propagations
+ */
+export async function sendRemovePeerToAllNodes(
+  peerName: string,
+  peerMeshIp: string,
+  authKey: string,
+  timeoutMs: number = 5000
+): Promise<{ success: boolean; total: number; succeeded: number; failed: number; error?: string }> {
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  
+  if (!meshConfig) {
+    return { success: false, total: 0, succeeded: 0, failed: 0, error: 'No mesh configured' };
+  }
+  
+  // Filter out the peer being removed
+  const otherPeers = meshConfig.peers.filter(p => {
+    const ip = p.allowedIps?.split('/')[0];
+    return ip && ip !== peerMeshIp;
+  });
+  
+  if (otherPeers.length === 0) {
+    return { success: true, total: 0, succeeded: 0, failed: 0 };
+  }
+  
+  let succeeded = 0;
+  let failed = 0;
+  
+  for (const peer of otherPeers) {
+    const ip = peer.allowedIps?.split('/')[0];
+    if (!ip) continue;
+    
+    const result = await httpPost(ip, 7777, '/remove-peer', {
+      authKey,
+      peerName,
+      peerMeshIp,
+    }, timeoutMs);
+    
+    if (result.success) {
+      succeeded++;
+    } else {
+      failed++;
+      logger.warn(`Failed to propagate remove-peer to ${peer.name}: ${result.error}`);
+    }
+  }
+  
+  const total = otherPeers.length;
+  
+  return {
+    success: failed === 0,
+    total,
+    succeeded,
+    failed,
+  };
 }
 
 // ============================================

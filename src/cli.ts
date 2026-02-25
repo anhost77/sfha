@@ -7,12 +7,14 @@
 import { Command } from 'commander';
 import { SfhaDaemon } from './daemon.js';
 import { loadConfig, getExampleConfig } from './config.js';
-import { getCorosyncState, getClusterNodes } from './corosync.js';
+import { getCorosyncState, getClusterNodes, getQuorumStatus } from './corosync.js';
 import { electLeader } from './election.js';
 import { getVipsState, removeVip } from './vip.js';
 import { sendCommand, isDaemonRunning } from './control.js';
 import { initI18n, t } from './i18n.js';
 import { getMeshManager, isWireGuardInstalled } from './mesh/index.js';
+import { removeNodeFromCorosync, getCorosyncNodes } from './mesh/corosync-mesh.js';
+import { sendLeaveOrderToPeer, sendRemovePeerToAllNodes } from './p2p-state.js';
 import { isServiceActive } from './resources.js';
 import { logger } from './utils/logger.js';
 import { propagateConfigToAllPeers, propagateVipsToAllPeers, isLocalNodeLeader, forwardVipChangeToLeader, checkPeerHealth } from './p2p-state.js';
@@ -29,7 +31,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.74';
+const VERSION = '1.0.75';
 
 function getVersion(): string {
   return VERSION;
@@ -729,6 +731,253 @@ async function reloadCommand(options: { lang?: string }): Promise<void> {
     console.error(colorize('✗', 'red'), response.error);
     process.exit(1);
   }
+}
+
+// ============================================
+// Leave / Node Remove Commands
+// ============================================
+
+/**
+ * Ce nœud quitte le cluster définitivement
+ * - Vérifier qu'on est en standby (sinon erreur)
+ * - Quitter Corosync proprement
+ * - Désactiver WireGuard
+ * - Nettoyer la config locale
+ */
+async function leaveCommand(options: { force?: boolean; lang?: string }): Promise<void> {
+  initI18n(options.lang);
+  
+  const localNodeName = hostname();
+  
+  console.log(colorize(`⚠️  Départ du cluster: ${localNodeName}`, 'yellow'));
+  console.log('');
+  
+  // 1. Vérifier que le daemon tourne et qu'on est en standby (sauf si --force)
+  if (!options.force) {
+    if (isDaemonRunning()) {
+      const response = await sendCommand({ action: 'status' });
+      if (response.success && response.data) {
+        const status = response.data;
+        
+        // Vérifier qu'on n'est pas leader
+        if (status.isLeader) {
+          console.error(colorize('✗', 'red'), 'Ce nœud est leader. Faites un failover d\'abord:');
+          console.error('    sfha failover');
+          console.error('  Ou utilisez --force pour ignorer');
+          process.exit(1);
+        }
+        
+        // Vérifier qu'on est en standby
+        if (!status.standby) {
+          console.error(colorize('✗', 'red'), 'Ce nœud n\'est pas en standby. Mettez-le en standby d\'abord:');
+          console.error('    sfha standby');
+          console.error('  Ou utilisez --force pour ignorer');
+          process.exit(1);
+        }
+      }
+    }
+  }
+  
+  // 2. Arrêter le daemon sfha
+  console.log(colorize('→', 'blue'), 'Arrêt du daemon sfha...');
+  try {
+    execSync('systemctl stop sfha 2>/dev/null || true', { stdio: 'pipe' });
+    execSync('systemctl disable sfha 2>/dev/null || true', { stdio: 'pipe' });
+    console.log(colorize('✓', 'green'), 'Daemon sfha arrêté');
+  } catch (e: any) {
+    if (!options.force) {
+      console.error(colorize('✗', 'red'), `Erreur arrêt sfha: ${e.message}`);
+      process.exit(1);
+    }
+    console.log(colorize('⚠', 'yellow'), `Arrêt sfha: ${e.message} (ignoré avec --force)`);
+  }
+  
+  // 3. Arrêter Corosync
+  console.log(colorize('→', 'blue'), 'Arrêt de Corosync...');
+  try {
+    execSync('systemctl stop corosync 2>/dev/null || true', { stdio: 'pipe' });
+    execSync('systemctl disable corosync 2>/dev/null || true', { stdio: 'pipe' });
+    console.log(colorize('✓', 'green'), 'Corosync arrêté');
+  } catch (e: any) {
+    if (!options.force) {
+      console.error(colorize('✗', 'red'), `Erreur arrêt Corosync: ${e.message}`);
+      process.exit(1);
+    }
+    console.log(colorize('⚠', 'yellow'), `Arrêt Corosync: ${e.message} (ignoré avec --force)`);
+  }
+  
+  // 4. Désactiver WireGuard (si configuré)
+  const mesh = getMeshManager();
+  if (mesh.isConfigured()) {
+    console.log(colorize('→', 'blue'), 'Désactivation de WireGuard...');
+    try {
+      execSync('wg-quick down wg-sfha 2>/dev/null || true', { stdio: 'pipe' });
+      execSync('systemctl disable wg-quick@wg-sfha 2>/dev/null || true', { stdio: 'pipe' });
+      console.log(colorize('✓', 'green'), 'WireGuard désactivé');
+    } catch (e: any) {
+      if (!options.force) {
+        console.error(colorize('✗', 'red'), `Erreur WireGuard: ${e.message}`);
+        process.exit(1);
+      }
+      console.log(colorize('⚠', 'yellow'), `Désactivation WireGuard: ${e.message} (ignoré avec --force)`);
+    }
+  } else {
+    console.log(colorize('ℹ', 'gray'), 'Pas de mesh WireGuard configuré');
+  }
+  
+  // 5. Nettoyer les fichiers de config locaux
+  console.log(colorize('→', 'blue'), 'Nettoyage de la configuration...');
+  const filesToRemove = [
+    '/etc/sfha/config.yml',
+    '/etc/sfha/mesh.json',
+    '/etc/sfha/cluster-state.json',
+    '/etc/corosync/corosync.conf',
+    '/etc/wireguard/wg-sfha.conf',
+  ];
+  
+  for (const file of filesToRemove) {
+    try {
+      if (existsSync(file)) {
+        // Backup au lieu de supprimer directement
+        const backupFile = `${file}.bak.leave.${Date.now()}`;
+        execSync(`mv "${file}" "${backupFile}"`, { stdio: 'pipe' });
+        console.log(colorize('  ✓', 'gray'), `${file} → ${backupFile}`);
+      }
+    } catch (e: any) {
+      console.log(colorize('  ⚠', 'yellow'), `${file}: ${e.message}`);
+    }
+  }
+  
+  console.log('');
+  console.log(colorize('✓', 'green'), `Le nœud ${localNodeName} a quitté le cluster.`);
+  console.log('');
+  console.log(colorize('ℹ', 'blue'), 'Note: Les autres nœuds doivent exécuter:');
+  console.log(`    sfha node remove ${localNodeName}`);
+  console.log('  pour supprimer ce nœud de leur configuration.');
+}
+
+/**
+ * Retirer un nœud distant du cluster
+ * - Vérifier le quorum (ne pas casser)
+ * - Envoyer ordre de leave au nœud cible via P2P
+ * - Si nœud inaccessible: cleanup local seulement + warning
+ * - Propager aux autres nœuds (supprimer peer WG)
+ */
+async function nodeRemoveCommand(targetHostname: string, options: { force?: boolean; lang?: string }): Promise<void> {
+  initI18n(options.lang);
+  
+  const localNodeName = hostname();
+  
+  console.log(colorize(`🗑️  Suppression du nœud: ${targetHostname}`, 'yellow'));
+  console.log('');
+  
+  // Vérifier qu'on ne se supprime pas soi-même
+  if (targetHostname === localNodeName) {
+    console.error(colorize('✗', 'red'), 'Utilisez "sfha leave" pour quitter le cluster vous-même.');
+    process.exit(1);
+  }
+  
+  // 1. Récupérer les infos du cluster
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  const hasMesh = !!meshConfig;
+  
+  // Trouver le nœud cible dans la config Corosync
+  const corosyncNodes = getCorosyncNodes();
+  const targetNode = corosyncNodes.find(n => n.name === targetHostname);
+  
+  if (!targetNode) {
+    console.error(colorize('✗', 'red'), `Nœud "${targetHostname}" non trouvé dans Corosync.`);
+    console.log('Nœuds connus:', corosyncNodes.map(n => n.name).join(', '));
+    process.exit(1);
+  }
+  
+  // Trouver l'IP du nœud (mesh IP si mesh, sinon IP Corosync)
+  const targetIp = targetNode.ip;
+  
+  // 2. Vérifier le quorum (sauf si --force)
+  if (!options.force) {
+    const quorum = getCorosyncState();
+    const currentOnline = quorum.nodes.filter(n => n.online).length;
+    const totalAfterRemoval = corosyncNodes.length - 1;
+    const requiredForQuorum = Math.floor(totalAfterRemoval / 2) + 1;
+    
+    // Vérifier que le nœud à supprimer est en standby (pas online en tant que participant actif)
+    const targetState = quorum.nodes.find(n => n.name === targetHostname);
+    const targetOnline = targetState?.online ?? false;
+    // Note: si le daemon p2p est configuré, on peut vérifier le standby via P2P
+    // Sinon, on vérifie juste que le node n'est pas online dans Corosync
+    
+    if (targetOnline && !options.force) {
+      console.error(colorize('✗', 'red'), `Le nœud "${targetHostname}" est en ligne.`);
+      console.error('    Demandez-lui de se mettre en standby et d\'exécuter "sfha leave"');
+      console.error('    Ou utilisez --force pour forcer la suppression');
+      process.exit(1);
+    }
+    
+    // Vérifier qu'on aura toujours le quorum après suppression
+    if (totalAfterRemoval >= 2 && currentOnline <= requiredForQuorum) {
+      console.error(colorize('✗', 'red'), 'La suppression casserait le quorum.');
+      console.error(`    Nœuds en ligne: ${currentOnline}, requis après suppression: ${requiredForQuorum}`);
+      console.error('    Utilisez --force pour ignorer');
+      process.exit(1);
+    }
+  }
+  
+  // 3. Tenter d'envoyer un ordre de leave au nœud (s'il est accessible via P2P)
+  if (hasMesh) {
+    console.log(colorize('→', 'blue'), `Envoi de l'ordre de départ à ${targetHostname} (${targetIp})...`);
+    
+    const leaveResult = await sendLeaveOrderToPeer(targetIp, meshConfig!.authKey);
+    
+    if (leaveResult.success) {
+      console.log(colorize('✓', 'green'), `Nœud ${targetHostname} a reçu l'ordre de départ`);
+    } else {
+      console.log(colorize('⚠', 'yellow'), `Nœud inaccessible via P2P: ${leaveResult.error}`);
+      console.log(colorize('ℹ', 'gray'), '  Le nœud sera supprimé de la config locale seulement');
+    }
+    
+    // 4. Supprimer le peer de la config locale WireGuard
+    console.log(colorize('→', 'blue'), 'Suppression du peer WireGuard local...');
+    const removeResult = mesh.removePeerByName(targetHostname);
+    if (removeResult.success) {
+      console.log(colorize('✓', 'green'), 'Peer WireGuard supprimé');
+    } else {
+      console.log(colorize('⚠', 'yellow'), `Peer WireGuard: ${removeResult.error}`);
+    }
+  } else {
+    console.log(colorize('ℹ', 'gray'), 'Pas de mesh WireGuard configuré, suppression Corosync uniquement');
+  }
+  
+  // 5. Supprimer de Corosync local
+  console.log(colorize('→', 'blue'), 'Suppression du nœud de Corosync local...');
+  try {
+    removeNodeFromCorosync(targetHostname);
+    execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+    console.log(colorize('✓', 'green'), 'Nœud supprimé de Corosync');
+  } catch (e: any) {
+    console.log(colorize('⚠', 'yellow'), `Corosync: ${e.message}`);
+  }
+  
+  // 6. Propager la suppression aux autres nœuds (si mesh configuré)
+  if (hasMesh) {
+    console.log(colorize('→', 'blue'), 'Propagation aux autres nœuds...');
+    
+    const propagateResult = await sendRemovePeerToAllNodes(targetHostname, targetIp, meshConfig!.authKey);
+    
+    if (propagateResult.success) {
+      console.log(colorize('✓', 'green'), `Propagé à ${propagateResult.succeeded}/${propagateResult.total} nœuds`);
+    } else if (propagateResult.total > 0) {
+      console.log(colorize('⚠', 'yellow'), `Propagation partielle: ${propagateResult.succeeded}/${propagateResult.total}`);
+    }
+  } else {
+    // Sans mesh, informer l'utilisateur de propager manuellement
+    console.log(colorize('⚠', 'yellow'), 'Sans mesh WireGuard, exécutez sur chaque autre nœud:');
+    console.log(`    sfha node remove ${targetHostname} --force`);
+  }
+  
+  console.log('');
+  console.log(colorize('✓', 'green'), `Le nœud ${targetHostname} a été retiré du cluster.`);
 }
 
 // ============================================
@@ -1470,6 +1719,26 @@ program
   .command('reload')
   .description('Recharger la configuration')
   .action(reloadCommand);
+
+program
+  .command('leave')
+  .description('Quitter le cluster (ce nœud quitte définitivement)')
+  .option('-f, --force', 'Ignorer les erreurs et forcer le départ')
+  .action(leaveCommand);
+
+// ============================================
+// Node Subcommands
+// ============================================
+
+const nodeCmd = program
+  .command('node')
+  .description('Gestion des nœuds du cluster');
+
+nodeCmd
+  .command('remove <hostname>')
+  .description('Retirer un nœud du cluster')
+  .option('-f, --force', 'Forcer la suppression même si le nœud est inaccessible')
+  .action(nodeRemoveCommand);
 
 // ============================================
 // VIP Subcommands
