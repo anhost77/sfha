@@ -16,7 +16,7 @@
 import http, { createServer, IncomingMessage, ServerResponse, Server } from 'http';
 import os from 'os';
 import { existsSync, writeFileSync, readFileSync } from 'fs';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import { getClusterNodes } from './corosync.js';
 import { logger } from './utils/logger.js';
 import { getMeshManager } from './mesh/manager.js';
@@ -904,10 +904,12 @@ ${servicesYaml || '  []'}
         return;
       }
       
-      // ===== POST /leave =====
-      // Reçoit un ordre de quitter le cluster (envoyé par un autre node)
+      // ===== POST /evict OR /leave =====
+      // Reçoit un ordre de quitter le cluster (envoyé par le leader ou un autre node)
       // Ce node va se cleaner et quitter
-      if (req.method === 'POST' && req.url === '/leave') {
+      // /evict est l'endpoint préféré pour le Control Plane
+      // /leave est gardé pour compatibilité
+      if (req.method === 'POST' && (req.url === '/evict' || req.url === '/leave')) {
         let body = '';
         req.on('data', (chunk) => {
           body += chunk.toString();
@@ -938,44 +940,63 @@ ${servicesYaml || '  []'}
             res.end(JSON.stringify({ success: true, message: 'Leave order received, cleaning up...' }));
             
             // Cleanup asynchronously after response is sent
-            setTimeout(async () => {
+            // IMPORTANT: Use spawn with detached:true to create a cleanup script
+            // that survives the sfha daemon shutdown
+            setTimeout(() => {
               try {
-                // 1. Stop sfha daemon
-                logger.info(`P2P: Stopping sfha daemon...`);
-                execSync('systemctl stop sfha 2>/dev/null || true', { stdio: 'pipe' });
-                execSync('systemctl disable sfha 2>/dev/null || true', { stdio: 'pipe' });
-                
-                // 2. Stop Corosync
-                logger.info(`P2P: Stopping Corosync...`);
-                execSync('systemctl stop corosync 2>/dev/null || true', { stdio: 'pipe' });
-                execSync('systemctl disable corosync 2>/dev/null || true', { stdio: 'pipe' });
-                
-                // 3. Stop WireGuard
-                logger.info(`P2P: Stopping WireGuard...`);
-                execSync('wg-quick down wg-sfha 2>/dev/null || true', { stdio: 'pipe' });
-                execSync('systemctl disable wg-quick@wg-sfha 2>/dev/null || true', { stdio: 'pipe' });
-                
-                // 4. Backup and remove config files
                 const now = Date.now();
-                const files = [
-                  '/etc/sfha/config.yml',
-                  '/etc/sfha/mesh.json',
-                  '/etc/sfha/cluster-state.json',
-                  '/etc/corosync/corosync.conf',
-                  '/etc/wireguard/wg-sfha.conf',
-                ];
+                const cleanupScript = `/tmp/sfha-cleanup-${now}.sh`;
                 
-                for (const file of files) {
-                  try {
-                    if (existsSync(file)) {
-                      execSync(`mv "${file}" "${file}.bak.leave.${now}"`, { stdio: 'pipe' });
-                    }
-                  } catch {}
+                // CRITICAL: MASK sfha to prevent ANY restart (disable only prevents boot start)
+                logger.info(`P2P: Masking sfha service to prevent restart...`);
+                try {
+                  execSync('systemctl mask sfha 2>/dev/null || true', { stdio: 'pipe' });
+                } catch (e) {
+                  // Ignore errors
                 }
                 
-                logger.info(`P2P: Leave cleanup complete`);
+                // Create cleanup script that will run after sfha stops
+                const script = `#!/bin/bash
+sleep 1
+# Stop and disable services
+systemctl stop corosync 2>/dev/null || true
+systemctl disable corosync 2>/dev/null || true
+wg-quick down wg-sfha 2>/dev/null || true
+systemctl disable wg-quick@wg-sfha 2>/dev/null || true
+# Unmask and disable sfha (so it can be started again later after rejoin)
+systemctl unmask sfha 2>/dev/null || true
+systemctl disable sfha 2>/dev/null || true
+# Backup config files
+for f in /etc/sfha/config.yml /etc/sfha/mesh.json /etc/sfha/cluster-state.json /etc/corosync/corosync.conf /etc/wireguard/wg-sfha.conf; do
+  if [ -f "$f" ]; then
+    mv "$f" "$f.bak.leave.${now}" 2>/dev/null || true
+  fi
+done
+# Self-destruct
+rm -f "${cleanupScript}"
+`;
+                
+                // Write and execute the script
+                writeFileSync(cleanupScript, script);
+                execSync(`chmod +x "${cleanupScript}"`, { stdio: 'pipe' });
+                
+                logger.info(`P2P: Spawning cleanup script and stopping sfha...`);
+                
+                // Spawn the cleanup script in background
+                const child = spawn('bash', [cleanupScript], {
+                  detached: true,
+                  stdio: 'ignore',
+                });
+                child.unref();
+                
+                // Now stop sfha (the cleanup script will continue in background)
+                // Use kill instead of systemctl to allow graceful shutdown
+                process.kill(process.pid, 'SIGTERM');
+                
               } catch (cleanupErr: any) {
                 logger.error(`P2P: Leave cleanup error: ${cleanupErr.message}`);
+                // Fallback: just stop ourselves
+                process.kill(process.pid, 'SIGTERM');
               }
             }, 500);
             
@@ -1050,6 +1071,175 @@ ${servicesYaml || '  []'}
             
           } catch (err: any) {
             logger.error(`P2P: Error handling remove-peer: ${err.message}`);
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          }
+        });
+        return;
+      }
+      
+      // ===== POST /api/node/evict =====
+      // ORCHESTRATION ENDPOINT - Appelé sur le LEADER pour supprimer un nœud du cluster
+      // Le leader va:
+      // 1. Envoyer /evict au node cible (pour qu'il se nettoie)
+      // 2. Propager /remove-peer à tous les autres nodes
+      // 3. Supprimer le peer de sa propre config
+      // Body: { authKey, nodeName }
+      if (req.method === 'POST' && req.url === '/api/node/evict') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body) as { 
+              authKey?: string;
+              nodeName: string;
+            };
+            
+            const mesh = getMeshManager();
+            const meshConfig = mesh.getConfig();
+            
+            if (!meshConfig) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No mesh configured' }));
+              return;
+            }
+            
+            if (!data.authKey || data.authKey !== meshConfig.authKey) {
+              res.writeHead(404);
+              res.end('Not Found');
+              return;
+            }
+            
+            if (!data.nodeName) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Missing nodeName' }));
+              return;
+            }
+            
+            const targetNodeName = data.nodeName;
+            const myHostname = os.hostname();
+            
+            // Cannot evict ourselves via this endpoint
+            if (targetNodeName === myHostname) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Cannot evict self via API. Use /evict directly on the node or "sfha leave".' }));
+              return;
+            }
+            
+            logger.info(`P2P: Orchestrating eviction of node ${targetNodeName}...`);
+            
+            // Find the target node's mesh IP
+            const targetPeer = meshConfig.peers.find(p => p.name === targetNodeName);
+            if (!targetPeer) {
+              // Node not found in peers - check if it's in Corosync
+              const corosyncNodes = getCorosyncNodes();
+              const corosyncNode = corosyncNodes.find(n => n.name === targetNodeName);
+              if (!corosyncNode) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: `Node "${targetNodeName}" not found in cluster` }));
+                return;
+              }
+              // Use corosync node IP as mesh IP
+              const targetMeshIp = corosyncNode.ip;
+              
+              // Proceed with partial cleanup (no WG peer to remove)
+              logger.warn(`P2P: Node ${targetNodeName} not in WG peers, proceeding with Corosync-only removal`);
+              
+              try {
+                const { removeNodeFromCorosync } = await import('./mesh/corosync-mesh.js');
+                removeNodeFromCorosync(targetNodeName);
+                execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+              } catch (corosyncErr: any) {
+                logger.warn(`P2P: Corosync remove failed: ${corosyncErr.message}`);
+              }
+              
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, message: `Node ${targetNodeName} removed from Corosync (no WG peer found)` }));
+              return;
+            }
+            
+            const targetMeshIp = targetPeer.allowedIps?.split('/')[0];
+            if (!targetMeshIp) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: `Cannot determine mesh IP for node "${targetNodeName}"` }));
+              return;
+            }
+            
+            // Step 1: Send /evict to the target node
+            logger.info(`P2P: Step 1 - Sending evict to ${targetNodeName} (${targetMeshIp})...`);
+            const evictResult = await httpPost(targetMeshIp, 7777, '/evict', { authKey: meshConfig.authKey }, 10000);
+            
+            if (evictResult.success) {
+              logger.info(`P2P: Target node ${targetNodeName} acknowledged eviction`);
+            } else {
+              logger.warn(`P2P: Target node unreachable or refused eviction: ${evictResult.error}`);
+              // Continue anyway - the node might be offline
+            }
+            
+            // Step 2: Propagate /remove-peer to all OTHER nodes (not the target, not us)
+            logger.info(`P2P: Step 2 - Propagating removal to other nodes...`);
+            const otherPeers = meshConfig.peers.filter(p => {
+              const ip = p.allowedIps?.split('/')[0];
+              return ip && ip !== targetMeshIp && p.name !== targetNodeName;
+            });
+            
+            let propagateSucceeded = 0;
+            let propagateFailed = 0;
+            
+            for (const peer of otherPeers) {
+              const peerIp = peer.allowedIps?.split('/')[0];
+              if (!peerIp) continue;
+              
+              const result = await httpPost(peerIp, 7777, '/remove-peer', {
+                authKey: meshConfig.authKey,
+                peerName: targetNodeName,
+                peerMeshIp: targetMeshIp,
+              }, 5000);
+              
+              if (result.success) {
+                propagateSucceeded++;
+                logger.debug(`P2P: Propagated to ${peer.name}`);
+              } else {
+                propagateFailed++;
+                logger.warn(`P2P: Failed to propagate to ${peer.name}: ${result.error}`);
+              }
+            }
+            
+            // Step 3: Remove the peer from our own config
+            logger.info(`P2P: Step 3 - Removing peer from local config...`);
+            
+            // Remove from Corosync first
+            try {
+              const { removeNodeFromCorosync } = await import('./mesh/corosync-mesh.js');
+              removeNodeFromCorosync(targetNodeName);
+              execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+            } catch (corosyncErr: any) {
+              logger.warn(`P2P: Local Corosync remove failed: ${corosyncErr.message}`);
+            }
+            
+            // Remove from WireGuard
+            const wgRemoveResult = mesh.removePeerByName(targetNodeName);
+            if (!wgRemoveResult.success) {
+              logger.warn(`P2P: Local WG remove failed: ${wgRemoveResult.error}`);
+            }
+            
+            logger.info(`P2P: Node ${targetNodeName} eviction complete`);
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ 
+              success: true, 
+              message: `Node ${targetNodeName} evicted from cluster`,
+              details: {
+                targetAcknowledged: evictResult.success,
+                propagated: propagateSucceeded,
+                propagateFailed: propagateFailed,
+              }
+            }));
+            
+          } catch (err: any) {
+            logger.error(`P2P: Error handling api/node/evict: ${err.message}`);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, error: err.message }));
           }
@@ -1801,23 +1991,30 @@ export async function propagateConfigToAllPeers(timeoutMs: number = 15000): Prom
     nodeId: 1,
   }];
   
-  // Ajouter les peers découverts - récupérer leur vrai hostname d'abord
+  // Ajouter les peers découverts - utiliser le nom stocké dans meshConfig.peers (reçu via /add-peer)
   let nodeId = 2;
   for (const peer of discoveredPeers) {
     const peerMeshIp = peer.allowedIps.split('/')[0];
     
-    // Récupérer le vrai hostname du peer via /info
-    let peerHostname = `node-${nodeId}`; // Fallback si /info échoue
-    try {
-      const infoResult = await httpGet(peerMeshIp, 7777, '/info', 3000);
-      if (infoResult.success && infoResult.data?.hostname) {
-        peerHostname = infoResult.data.hostname;
-        logger.info(`  Peer ${peerMeshIp}: hostname="${peerHostname}"`);
-      } else {
-        logger.warn(`  Peer ${peerMeshIp}: /info failed, using fallback name "${peerHostname}"`);
+    // Chercher le hostname dans les peers stockés (reçu lors du /add-peer initial)
+    const storedPeer = meshConfig.peers.find(p => p.allowedIps?.startsWith(peerMeshIp) || p.allowedIps?.includes(peerMeshIp));
+    let peerHostname = storedPeer?.name || `node-${nodeId}`; // Fallback si pas trouvé
+    
+    if (storedPeer?.name) {
+      logger.info(`  Peer ${peerMeshIp}: hostname="${peerHostname}" (from stored config)`);
+    } else {
+      // Fallback: essayer /info HTTP si pas dans la config
+      try {
+        const infoResult = await httpGet(peerMeshIp, 7777, '/info', 3000);
+        if (infoResult.success && infoResult.data?.hostname) {
+          peerHostname = infoResult.data.hostname;
+          logger.info(`  Peer ${peerMeshIp}: hostname="${peerHostname}" (from /info)`);
+        } else {
+          logger.warn(`  Peer ${peerMeshIp}: not in stored config and /info failed, using fallback name "${peerHostname}"`);
+        }
+      } catch (err: any) {
+        logger.warn(`  Peer ${peerMeshIp}: /info error (${err.message}), using fallback name "${peerHostname}"`);
       }
-    } catch (err: any) {
-      logger.warn(`  Peer ${peerMeshIp}: /info error (${err.message}), using fallback name "${peerHostname}"`);
     }
     
     allNodes.push({
@@ -2221,6 +2418,70 @@ export async function sendRemovePeerToAllNodes(
     succeeded,
     failed,
   };
+}
+
+/**
+ * Send evict order to a peer node (alias for leave, but using /evict endpoint)
+ * The peer will clean itself up and exit the cluster
+ * 
+ * @param peerMeshIp The mesh IP of the peer to evict
+ * @param authKey Cluster auth key for authentication
+ * @param timeoutMs Timeout in ms (default: 10s)
+ * @returns Result of the operation
+ */
+export async function sendEvictOrderToPeer(
+  peerMeshIp: string,
+  authKey: string,
+  timeoutMs: number = 10000
+): Promise<{ success: boolean; error?: string }> {
+  return httpPost(peerMeshIp, 7777, '/evict', { authKey }, timeoutMs);
+}
+
+/**
+ * Evict a node from the cluster via the leader node.
+ * This calls the leader's /api/node/evict endpoint which orchestrates:
+ * 1. Sending /evict to the target node
+ * 2. Propagating /remove-peer to all other nodes
+ * 3. Removing the peer from the leader's config
+ * 
+ * This is the recommended way for the Control Plane to remove a node.
+ * 
+ * @param nodeName The hostname of the node to evict
+ * @param timeoutMs Timeout in ms (default: 30s for full orchestration)
+ * @returns Result of the eviction
+ */
+export async function evictNodeViaLeader(
+  nodeName: string,
+  timeoutMs: number = 30000
+): Promise<{ success: boolean; message?: string; error?: string; details?: any }> {
+  const mesh = getMeshManager();
+  const meshConfig = mesh.getConfig();
+  
+  if (!meshConfig) {
+    return { success: false, error: 'No mesh configured' };
+  }
+  
+  // If we are the leader, call our local endpoint
+  if (isLocalNodeLeader()) {
+    const myMeshIp = meshConfig.meshIp?.split('/')[0] || '127.0.0.1';
+    return httpPost(myMeshIp, 7777, '/api/node/evict', {
+      authKey: meshConfig.authKey,
+      nodeName,
+    }, timeoutMs);
+  }
+  
+  // Otherwise, find the leader and forward
+  const leaderIp = findLeaderMeshIp();
+  if (!leaderIp) {
+    return { success: false, error: 'Could not find leader mesh IP' };
+  }
+  
+  logger.info(`Forwarding eviction of ${nodeName} to leader at ${leaderIp}...`);
+  
+  return httpPost(leaderIp, 7777, '/api/node/evict', {
+    authKey: meshConfig.authKey,
+    nodeName,
+  }, timeoutMs);
 }
 
 // ============================================

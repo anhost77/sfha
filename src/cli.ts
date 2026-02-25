@@ -14,7 +14,7 @@ import { sendCommand, isDaemonRunning } from './control.js';
 import { initI18n, t } from './i18n.js';
 import { getMeshManager, isWireGuardInstalled } from './mesh/index.js';
 import { removeNodeFromCorosync, getCorosyncNodes } from './mesh/corosync-mesh.js';
-import { sendLeaveOrderToPeer, sendRemovePeerToAllNodes } from './p2p-state.js';
+import { sendLeaveOrderToPeer, sendRemovePeerToAllNodes, sendEvictOrderToPeer } from './p2p-state.js';
 import { isServiceActive } from './resources.js';
 import { logger } from './utils/logger.js';
 import { propagateConfigToAllPeers, propagateVipsToAllPeers, isLocalNodeLeader, forwardVipChangeToLeader, checkPeerHealth } from './p2p-state.js';
@@ -944,16 +944,16 @@ async function nodeRemoveCommand(targetHostname: string, options: { force?: bool
     }
   }
   
-  // 3. Tenter d'envoyer un ordre de leave au nœud (s'il est accessible via P2P)
+  // 3. Tenter d'envoyer un ordre d'éviction au nœud (s'il est accessible via P2P)
   if (hasMesh) {
-    console.log(colorize('→', 'blue'), `Envoi de l'ordre de départ à ${targetHostname} (${targetIp})...`);
+    console.log(colorize('→', 'blue'), `Envoi de l'ordre d'éviction à ${targetHostname} (${targetIp})...`);
     
-    const leaveResult = await sendLeaveOrderToPeer(targetIp, meshConfig!.authKey);
+    const evictResult = await sendEvictOrderToPeer(targetIp, meshConfig!.authKey);
     
-    if (leaveResult.success) {
-      console.log(colorize('✓', 'green'), `Nœud ${targetHostname} a reçu l'ordre de départ`);
+    if (evictResult.success) {
+      console.log(colorize('✓', 'green'), `Nœud ${targetHostname} a reçu l'ordre d'éviction`);
     } else {
-      console.log(colorize('⚠', 'yellow'), `Nœud inaccessible via P2P: ${leaveResult.error}`);
+      console.log(colorize('⚠', 'yellow'), `Nœud inaccessible via P2P: ${evictResult.error}`);
       console.log(colorize('ℹ', 'gray'), '  Le nœud sera supprimé de la config locale seulement');
     }
     
