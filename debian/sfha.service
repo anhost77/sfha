@@ -1,8 +1,8 @@
 [Unit]
 Description=sfha - Système de Haute Disponibilité léger
 Documentation=https://github.com/serverflow/sfha
-After=network.target corosync.service
-Requires=corosync.service
+After=network.target
+Wants=corosync.service
 ConditionPathExists=/etc/sfha/config.yml
 
 [Service]

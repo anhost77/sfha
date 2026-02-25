@@ -6,6 +6,13 @@ case "$1" in
         # Créer le répertoire de config si absent
         mkdir -p /etc/sfha
         
+        # FIX: S'assurer que le service sfha peut démarrer sans corosync
+        # (en phase de configuration, corosync n'est pas encore configuré)
+        if [ -f /lib/systemd/system/sfha.service ]; then
+            sed -i 's/Requires=corosync.service/Wants=corosync.service/' /lib/systemd/system/sfha.service
+            sed -i 's/After=network.target corosync.service/After=network.target/' /lib/systemd/system/sfha.service
+        fi
+        
         # Copier l'exemple si pas de config
         if [ ! -f /etc/sfha/config.yml ]; then
             if [ -f /etc/sfha/config.yml.example ]; then
