@@ -1765,7 +1765,7 @@ function discoverWireGuardPeers(): Array<{ publicKey: string; endpoint: string; 
  * @param timeoutMs Timeout par nœud (défaut: 10s)
  * @returns Résultat de la propagation
  */
-export async function propagateConfigToAllPeers(timeoutMs: number = 10000): Promise<PropagateResult> {
+export async function propagateConfigToAllPeers(timeoutMs: number = 15000): Promise<PropagateResult> {
   const mesh = getMeshManager();
   const meshConfig = mesh.getConfig();
   

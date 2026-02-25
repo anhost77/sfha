@@ -2574,13 +2574,25 @@ async function propagateCommand(options: { timeout?: string; lang?: string }): P
   const result = await propagateConfigToAllPeers(timeoutMs);
   
   console.log();
-  if (result.success) {
+  
+  // Considérer comme succès si plus de 50% des nœuds ont été configurés
+  // (les timeouts P2P ne signifient pas forcément que la config n'est pas passée)
+  const partialSuccess = result.succeeded > 0 && result.succeeded >= result.total / 2;
+  
+  if (result.success || partialSuccess) {
     // Marquer le cluster comme actif
     completePropagation();
     
-    console.log(colorize('✓', 'green'), `Propagation terminée: ${result.succeeded}/${result.total} nœuds mis à jour`);
-    if (result.failed > 0) {
-      console.log(colorize('⚠', 'yellow'), `${result.failed} nœud(s) en échec`);
+    if (result.success) {
+      console.log(colorize('✓', 'green'), `Propagation terminée: ${result.succeeded}/${result.total} nœuds mis à jour`);
+    } else {
+      console.log(colorize('⚠', 'yellow'), `Propagation partielle: ${result.succeeded}/${result.total} nœuds mis à jour`);
+      console.log(colorize('ℹ', 'blue'), `Cluster marqué comme actif (quorum probable)`);
+    }
+    if (result.failed > 0 && result.errors) {
+      for (const err of result.errors) {
+        console.log(`  - ${err.node}: ${err.error}`);
+      }
     }
   } else {
     console.error(colorize('✗', 'red'), `Propagation échouée: ${result.error}`);
