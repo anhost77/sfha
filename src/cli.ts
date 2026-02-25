@@ -31,7 +31,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 // Version
 // ============================================
 
-const VERSION = '1.0.75';
+const VERSION = '1.0.76';
 
 function getVersion(): string {
   return VERSION;
@@ -937,30 +937,8 @@ async function nodeRemoveCommand(targetHostname: string, options: { force?: bool
       console.log(colorize('ℹ', 'gray'), '  Le nœud sera supprimé de la config locale seulement');
     }
     
-    // 4. Supprimer le peer de la config locale WireGuard
-    console.log(colorize('→', 'blue'), 'Suppression du peer WireGuard local...');
-    const removeResult = mesh.removePeerByName(targetHostname);
-    if (removeResult.success) {
-      console.log(colorize('✓', 'green'), 'Peer WireGuard supprimé');
-    } else {
-      console.log(colorize('⚠', 'yellow'), `Peer WireGuard: ${removeResult.error}`);
-    }
-  } else {
-    console.log(colorize('ℹ', 'gray'), 'Pas de mesh WireGuard configuré, suppression Corosync uniquement');
-  }
-  
-  // 5. Supprimer de Corosync local
-  console.log(colorize('→', 'blue'), 'Suppression du nœud de Corosync local...');
-  try {
-    removeNodeFromCorosync(targetHostname);
-    execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
-    console.log(colorize('✓', 'green'), 'Nœud supprimé de Corosync');
-  } catch (e: any) {
-    console.log(colorize('⚠', 'yellow'), `Corosync: ${e.message}`);
-  }
-  
-  // 6. Propager la suppression aux autres nœuds (si mesh configuré)
-  if (hasMesh) {
+    // 4. PROPAGER D'ABORD aux autres nœuds (AVANT de supprimer localement !)
+    // C'est critique : si on supprime le peer WG local avant, on coupe les routes mesh
     console.log(colorize('→', 'blue'), 'Propagation aux autres nœuds...');
     
     const propagateResult = await sendRemovePeerToAllNodes(targetHostname, targetIp, meshConfig!.authKey);
@@ -970,8 +948,40 @@ async function nodeRemoveCommand(targetHostname: string, options: { force?: bool
     } else if (propagateResult.total > 0) {
       console.log(colorize('⚠', 'yellow'), `Propagation partielle: ${propagateResult.succeeded}/${propagateResult.total}`);
     }
+    
+    // 5. Supprimer de Corosync local
+    console.log(colorize('→', 'blue'), 'Suppression du nœud de Corosync local...');
+    try {
+      removeNodeFromCorosync(targetHostname);
+      execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+      console.log(colorize('✓', 'green'), 'Nœud supprimé de Corosync');
+    } catch (e: any) {
+      console.log(colorize('⚠', 'yellow'), `Corosync: ${e.message}`);
+    }
+    
+    // 6. Supprimer le peer WireGuard LOCAL (à la fin, après propagation)
+    console.log(colorize('→', 'blue'), 'Suppression du peer WireGuard local...');
+    const removeResult = mesh.removePeerByName(targetHostname);
+    if (removeResult.success) {
+      console.log(colorize('✓', 'green'), 'Peer WireGuard supprimé');
+    } else {
+      console.log(colorize('⚠', 'yellow'), `Peer WireGuard: ${removeResult.error}`);
+    }
   } else {
-    // Sans mesh, informer l'utilisateur de propager manuellement
+    // Sans mesh, suppression Corosync uniquement
+    console.log(colorize('ℹ', 'gray'), 'Pas de mesh WireGuard configuré, suppression Corosync uniquement');
+    
+    // 5. Supprimer de Corosync local
+    console.log(colorize('→', 'blue'), 'Suppression du nœud de Corosync local...');
+    try {
+      removeNodeFromCorosync(targetHostname);
+      execSync('corosync-cfgtool -R 2>/dev/null || true', { stdio: 'pipe' });
+      console.log(colorize('✓', 'green'), 'Nœud supprimé de Corosync');
+    } catch (e: any) {
+      console.log(colorize('⚠', 'yellow'), `Corosync: ${e.message}`);
+    }
+    
+    // Informer l'utilisateur de propager manuellement
     console.log(colorize('⚠', 'yellow'), 'Sans mesh WireGuard, exécutez sur chaque autre nœud:');
     console.log(`    sfha node remove ${targetHostname} --force`);
   }

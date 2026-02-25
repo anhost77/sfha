@@ -3,7 +3,7 @@
  * @description Intégration Corosync (quorum, membership)
  */
 
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { EventEmitter } from 'events';
 import { t } from './i18n.js';
@@ -58,11 +58,22 @@ function logParseWarning(context: string, details: string): void {
 
 function runCommand(cmd: string, args: string[] = []): string {
   try {
-    return execSync(`${cmd} ${args.join(' ')}`, {
+    // Use spawnSync instead of execSync to avoid shell wrapper
+    // This ensures timeout kills the actual process, not just the shell
+    const result = spawnSync(cmd, args, {
       encoding: 'utf-8',
       timeout: 5000,
+      killSignal: 'SIGKILL',
       stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    });
+    
+    if (result.error) {
+      throw result.error;
+    }
+    if (result.status !== 0) {
+      throw new Error(result.stderr || `Exit code ${result.status}`);
+    }
+    return (result.stdout || '').trim();
   } catch (error: any) {
     throw new Error(t('error.commandFailed', { cmd: `${cmd} ${args.join(' ')}` }));
   }
@@ -93,6 +104,8 @@ export function isCorosyncRunning(): boolean {
   try {
     const output = execSync('systemctl is-active corosync', {
       encoding: 'utf-8',
+      timeout: 5000,
+      killSignal: 'SIGKILL',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     return output === 'active';
@@ -538,6 +551,7 @@ export function publishStandbyState(nodeName: string, standby: boolean): boolean
     const key = `sfha.node.${nodeName}.standby`;
     execSync(`corosync-cmapctl -s ${key} u8 ${standby ? 1 : 0}`, {
       timeout: 2000,
+      killSignal: 'SIGKILL',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     return true;
@@ -561,6 +575,7 @@ export function getStandbyNodes(): Set<string> {
     const output = execSync('corosync-cmapctl 2>/dev/null | grep "sfha.node.*standby"', {
       encoding: 'utf-8',
       timeout: 2000,
+      killSignal: 'SIGKILL',
     });
     // Parse: "sfha.node.node1.standby (u8) = 1"
     const regex = /sfha\.node\.([^.]+)\.standby.*=\s*1/g;
@@ -586,6 +601,7 @@ export function clearStandbyState(nodeName: string): boolean {
     const key = `sfha.node.${nodeName}.standby`;
     execSync(`corosync-cmapctl -D ${key} 2>/dev/null || true`, {
       timeout: 2000,
+      killSignal: 'SIGKILL',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     return true;

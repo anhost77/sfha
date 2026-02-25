@@ -100,6 +100,7 @@ function checkSystemd(unit: string): { ok: boolean; error?: string } {
     const output = execSync(`systemctl is-active ${unit}`, {
       encoding: 'utf-8',
       timeout: 5000,
+      killSignal: 'SIGKILL',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     
