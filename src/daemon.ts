@@ -74,7 +74,7 @@ export interface DaemonOptions {
 // ============================================
 
 const PID_FILE = '/var/run/sfha.pid';
-const VERSION = '1.0.70';
+const VERSION = '1.0.77';
 
 // ============================================
 // Daemon
