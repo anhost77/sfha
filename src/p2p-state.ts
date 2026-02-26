@@ -15,7 +15,7 @@
 
 import http, { createServer, IncomingMessage, ServerResponse, Server } from 'http';
 import os from 'os';
-import { existsSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { execSync, spawn } from 'child_process';
 import { getClusterNodes } from './corosync.js';
 import { logger } from './utils/logger.js';
@@ -935,62 +935,68 @@ ${servicesYaml || '  []'}
             
             logger.info(`P2P: Received leave order - cleaning up and exiting cluster`);
             
-            // Respond first, then cleanup
+            // Respond first, then cleanup SYNCHRONOUSLY before stopping
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, message: 'Leave order received, cleaning up...' }));
             
-            // Cleanup asynchronously after response is sent
-            // IMPORTANT: Use spawn with detached:true to create a cleanup script
-            // that survives the sfha daemon shutdown
+            // Give time for response to be sent, then cleanup synchronously
             setTimeout(() => {
               try {
-                const now = Date.now();
-                const cleanupScript = `/tmp/sfha-cleanup-${now}.sh`;
-                
                 // CRITICAL: MASK sfha to prevent ANY restart (disable only prevents boot start)
                 logger.info(`P2P: Masking sfha service to prevent restart...`);
                 try {
                   execSync('systemctl mask sfha 2>/dev/null || true', { stdio: 'pipe' });
+                } catch (e) { /* ignore */ }
+                
+                // SYNCHRONOUS cleanup - do everything before stopping sfha
+                logger.info(`P2P: Stopping Corosync...`);
+                try {
+                  execSync('systemctl stop corosync 2>/dev/null || true', { stdio: 'pipe', timeout: 10000 });
+                  execSync('systemctl disable corosync 2>/dev/null || true', { stdio: 'pipe' });
                 } catch (e) {
-                  // Ignore errors
+                  logger.warn(`P2P: Failed to stop corosync: ${(e as Error).message}`);
                 }
                 
-                // Create cleanup script that will run after sfha stops
-                const script = `#!/bin/bash
-sleep 1
-# Stop and disable services
-systemctl stop corosync 2>/dev/null || true
-systemctl disable corosync 2>/dev/null || true
-wg-quick down wg-sfha 2>/dev/null || true
-systemctl disable wg-quick@wg-sfha 2>/dev/null || true
-# Unmask and disable sfha (so it can be started again later after rejoin)
-systemctl unmask sfha 2>/dev/null || true
-systemctl disable sfha 2>/dev/null || true
-# Backup config files
-for f in /etc/sfha/config.yml /etc/sfha/mesh.json /etc/sfha/cluster-state.json /etc/corosync/corosync.conf /etc/wireguard/wg-sfha.conf; do
-  if [ -f "$f" ]; then
-    mv "$f" "$f.bak.leave.${now}" 2>/dev/null || true
-  fi
-done
-# Self-destruct
-rm -f "${cleanupScript}"
-`;
+                logger.info(`P2P: Stopping WireGuard...`);
+                try {
+                  execSync('wg-quick down wg-sfha 2>/dev/null || true', { stdio: 'pipe', timeout: 5000 });
+                  execSync('systemctl disable wg-quick@wg-sfha 2>/dev/null || true', { stdio: 'pipe' });
+                } catch (e) { /* ignore */ }
                 
-                // Write and execute the script
-                writeFileSync(cleanupScript, script);
-                execSync(`chmod +x "${cleanupScript}"`, { stdio: 'pipe' });
+                // Unmask sfha so it can be started again later after rejoin
+                try {
+                  execSync('systemctl unmask sfha 2>/dev/null || true', { stdio: 'pipe' });
+                  execSync('systemctl disable sfha 2>/dev/null || true', { stdio: 'pipe' });
+                } catch (e) { /* ignore */ }
                 
-                logger.info(`P2P: Spawning cleanup script and stopping sfha...`);
+                // DELETE all config files - clean slate for potential rejoin
+                logger.info(`P2P: Deleting config files...`);
+                const filesToDelete = [
+                  '/etc/sfha/config.yml',
+                  '/etc/sfha/mesh.json', 
+                  '/etc/sfha/cluster-state.json',
+                  '/etc/sfha/corosync-state.json',
+                  '/etc/corosync/corosync.conf',
+                  '/etc/corosync/authkey',
+                  '/etc/wireguard/wg-sfha.conf',
+                ];
+                for (const f of filesToDelete) {
+                  try {
+                    if (existsSync(f)) {
+                      unlinkSync(f);
+                      logger.info(`P2P: Deleted ${f}`);
+                    }
+                  } catch (e) { /* ignore */ }
+                }
                 
-                // Spawn the cleanup script in background
-                const child = spawn('bash', [cleanupScript], {
-                  detached: true,
-                  stdio: 'ignore',
-                });
-                child.unref();
+                // Clean up old backup files and cleanup scripts
+                try {
+                  execSync('rm -f /etc/sfha/*.bak.* /etc/corosync/*.bak.* /tmp/sfha-cleanup*.sh 2>/dev/null || true', { stdio: 'pipe' });
+                } catch (e) { /* ignore */ }
                 
-                // Now stop sfha (the cleanup script will continue in background)
-                // Use kill instead of systemctl to allow graceful shutdown
+                logger.info(`P2P: Cleanup complete, stopping sfha daemon...`);
+                
+                // Now stop sfha
                 process.kill(process.pid, 'SIGTERM');
                 
               } catch (cleanupErr: any) {
